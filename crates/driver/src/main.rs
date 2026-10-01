@@ -14,7 +14,6 @@ struct Cli {
 enum Commmand {
     Eval {
         file: PathBuf,
-
         #[arg(long)]
         dump_ir: bool,
     },
@@ -25,12 +24,10 @@ fn main() {
     use Commmand::*;
 
     match cli.command {
-        Eval { file, dump_ir: _ } => {
+        Eval { file, dump_ir } => {
             let source = fs::read_to_string(file).unwrap();
             let ast = frontend::get_ast(source);
             println!("{:?}", ast);
         }
     }
-
-    println!("Hello, world!");
 }

@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 #[command(about = "Pure Nix evualuation engine", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commmand,    
+    command: Commmand,
 }
 
 #[derive(Subcommand)]
@@ -17,7 +17,7 @@ enum Commmand {
 
         #[arg(long)]
         dump_ir: bool,
-    }
+    },
 }
 
 fn main() {
@@ -25,9 +25,10 @@ fn main() {
     use Commmand::*;
 
     match cli.command {
-        Eval { file,  dump_ir } => {
+        Eval { file, dump_ir: _ } => {
             let source = fs::read_to_string(file).unwrap();
-                let ast = frontend::get_ast(source);
+            let ast = frontend::get_ast(source);
+            println!("{:?}", ast);
         }
     }
 

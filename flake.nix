@@ -25,7 +25,7 @@
 
         # For `nix develop`:
         devShell = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ rustc cargo rust-analyzer ];
+          nativeBuildInputs = with pkgs; [ rustc cargo rust-analyzer  rustup];
         };
       }
     );

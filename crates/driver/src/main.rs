@@ -26,8 +26,13 @@ fn main() {
     match cli.command {
         Eval { file, dump_ir } => {
             let source = fs::read_to_string(file).unwrap();
-            let ast = frontend::get_ast(source);
-            println!("{:?}", ast);
+            match parser::parse_str(&source) {
+                Ok(ast) => println!("{:?}", ast),
+                Err(e) => {
+                    eprintln!("Parse error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }

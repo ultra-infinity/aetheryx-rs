@@ -1,0 +1,30 @@
+[package]
+name = "awint_dag"
+version = "0.19.0"
+edition = "2024"
+authors = ["Aaron Kutch <aaronkutch@att.net>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/AaronKutch/awint"
+documentation = "https://docs.rs/awint"
+description = "DAG `awint` functionality"
+keywords = ["int", "integer", "big", "math", "no_std"]
+categories = ["data-structures", "mathematics", "algorithms", "no-std"]
+
+[features]
+default = ["try_support"]
+try_support = []
+debug = ["awint_macro_internals/debug"]
+# forces `PState` to always have a generation counter
+gen_counter_for_pstate = []
+# makes `PState` use a u32 sized index and counter
+u32_for_pstate = []
+
+[dependencies]
+awint_ext = { workspace = true }
+awint_macro_internals = { workspace = true }
+awint_macros = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+awint = { path = "../awint", default-features = false, features = ["alloc"] }

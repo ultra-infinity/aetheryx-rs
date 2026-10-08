@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-ast = { path = "../ast" }
-parser = { path = "../parser" }
-ir = { path = "../ir" }
+dialect = { path = "../dialect" }
+rnix = "0.14.0"
+anyhow = "1.0"

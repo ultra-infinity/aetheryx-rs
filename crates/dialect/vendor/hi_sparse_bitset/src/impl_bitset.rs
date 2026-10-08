@@ -1,0 +1,314 @@
+use crate::bitset_interface::{bitset_is_empty, bitsets_eq, bitset_contains};
+
+pub(crate) use crate::bitset_interface::LevelMasks;
+pub(crate) use crate::bitset_interface::LevelMasksIterExt;
+
+pub use crate::primitive::Primitive;
+
+/// Can detect inequality earlier with [TRUSTED_HIERARCHY].
+///
+/// [TRUSTED_HIERARCHY]: crate::BitSetBase::TRUSTED_HIERARCHY
+#[inline]
+pub fn is_eq<L, R>(left: L, right: R) -> bool
+where
+    L: LevelMasksIterExt,
+    R: LevelMasksIterExt<Conf = L::Conf>
+{
+    bitsets_eq(left, right)
+}
+
+/// O(1) for [TRUSTED_HIERARCHY].
+///
+/// [TRUSTED_HIERARCHY]: crate::BitSetBase::TRUSTED_HIERARCHY
+#[inline]
+pub fn is_empty<S: LevelMasksIterExt>(bitset: S) -> bool {
+    bitset_is_empty(bitset)
+}
+
+#[inline]
+pub fn contains<S: LevelMasks>(bitset: S, index: usize) -> bool {
+    bitset_contains(bitset, index)
+}
+
+/// Makes bitset from [LevelMasksIterExt].
+///
+/// Implements [BitSetInterface], [IntoIterator], [Eq], [Debug], [BitAnd], [BitOr], [BitXor], [Sub]
+/// for [LevelMasksIterExt]. Also duplicates part of BitSetInterface in struct impl,
+/// for ease of use.
+///
+/// `ref` version will implement [BitSetInterface] for &T only.
+/// Otherwise - it will be implemented for both T and &T.
+/// Working only with refs will prevent T from being passed to apply/reduce
+/// as value, and will allow to store `&self` pointer safely inside [Level1BlockData].
+///
+/// [BitAnd]: core::ops::BitAnd
+/// [BitOr]: core::ops::BitOr
+/// [BitXor]: core::ops::BitXor
+/// [Sub]: core::ops::Sub
+/// [BitSetInterface]: crate::BitSetInterface
+/// [BitSet]: crate::BitSet
+/// [Level1BlockData]: LevelMasksIterExt::Level1BlockData
+macro_rules! impl_bitset {
+    (impl <$($generics:tt),*> for $t:ty) => {
+        impl_bitset!(impl<$($generics),*> for $t where)
+    };
+
+    (impl <$($generics:tt),*> for $t:ty where $($where_bounds:tt)*) => {
+        unsafe impl<$($generics),*> $crate::BitSetInterface for $t
+        where
+            $($where_bounds)*
+        {}
+
+        impl<$($generics),*> IntoIterator for $t
+        where
+            $($where_bounds)*
+        {
+            type Item = usize;
+            type IntoIter = $crate::iter::IndexIter<Self>;
+
+            #[inline]
+            fn into_iter(self) -> Self::IntoIter {
+                $crate::iter::IndexIter::new(self)
+            }
+        }
+
+        impl<$($generics),*, Rhs> core::ops::BitAnd<Rhs> for $t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::And, Self, Rhs>;
+
+            /// Returns intersection of self and rhs bitsets.
+            #[inline]
+            fn bitand(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::And, self, rhs)
+            }
+        }
+
+        impl<$($generics),*, Rhs> core::ops::BitOr<Rhs> for $t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Or, Self, Rhs>;
+
+            /// Returns union of self and rhs bitsets.
+            #[inline]
+            fn bitor(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Or, self, rhs)
+            }
+        }
+
+        impl<$($generics),*, Rhs> core::ops::BitXor<Rhs> for $t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Xor, Self, Rhs>;
+
+            /// Returns symmetric difference of self and rhs bitsets.
+            #[inline]
+            fn bitxor(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Xor, self, rhs)
+            }
+        }
+
+        impl<$($generics),*, Rhs> core::ops::Sub<Rhs> for $t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Sub, Self, Rhs>;
+
+            /// Returns difference of self and rhs bitsets.
+            ///
+            /// _Or relative complement of rhs in self._
+            #[inline]
+            fn sub(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Sub, self, rhs)
+            }
+        }
+
+        impl_bitset!(impl<$($generics),*> for ref $t where $($where_bounds)*);
+    };
+
+    (impl <$($generics:tt),*> for ref $t:ty where $($where_bounds:tt)*) => {
+        impl_bitset!(impl<$($generics),*> const<> for ref $t where $($where_bounds)*);
+    };
+
+    (impl <$($generics:tt),*> const<$($consts_name:ident : $consts_ty:ty),*> for ref $t:ty where $($where_bounds:tt)*) => {
+        // --------------------------------
+        // BitsetInterface
+        unsafe impl<$($generics),* ,$(const $consts_name: $consts_ty),*> $crate::BitSetInterface for &$t
+        where
+            $($where_bounds)*
+        {}
+
+        // --------------------------------
+        // Duplicate BitsetInterface (not strictly necessary, but ergonomic)
+        impl<$($generics),* ,$(const $consts_name: $consts_ty),*> $t
+        where
+            $($where_bounds)*
+        {
+            #[inline]
+            pub fn block_iter(&self) -> $crate::iter::BlockIter<&'_ Self>
+            {
+                $crate::iter::BlockIter::new(self)
+            }
+
+            #[inline]
+            pub fn iter(&self) -> $crate::iter::IndexIter<&'_ Self>
+            {
+                $crate::iter::IndexIter::new(self)
+            }
+
+            #[inline]
+            pub fn contains(&self, index: usize) -> bool {
+                $crate::impl_bitset::contains(self, index)
+            }
+
+            /// See [BitSetInterface::is_empty()]
+            ///
+            /// [BitSetInterface::is_empty()]: crate::BitSetInterface::is_empty()
+            #[inline]
+            pub fn is_empty(&self) -> bool {
+                $crate::impl_bitset::is_empty(self)
+            }
+
+            #[inline]
+            pub fn union<Other>(&self, other: Other) ->
+                $crate::Apply<$crate::ops::Or, &Self, Other>
+            where
+                Other: $crate::BitSetInterface<Conf=<Self as BitSetBase>::Conf>
+            {
+                $crate::Apply::new($crate::ops::Or, self, other)
+            }
+
+            #[inline]
+            pub fn intersection<Other>(&self, other: Other) ->
+                $crate::Apply<$crate::ops::And, &Self, Other>
+            where
+                Other: $crate::BitSetInterface<Conf=<Self as BitSetBase>::Conf>
+            {
+                $crate::Apply::new($crate::ops::And, self, other)
+            }
+        }
+
+        // --------------------------------
+        // IntoIterator
+        impl<$($generics),* ,$(const $consts_name: $consts_ty),*> IntoIterator for &$t
+        where
+            $($where_bounds)*
+        {
+            type Item = usize;
+            type IntoIter = $crate::iter::IndexIter<Self>;
+
+            #[inline]
+            fn into_iter(self) -> Self::IntoIter {
+                $crate::iter::IndexIter::new(self)
+            }
+        }
+
+        // --------------------------------
+        // Eq
+        impl<$($generics),*,Rhs ,$(const $consts_name: $consts_ty),*> PartialEq<Rhs> for $t
+        where
+            Rhs: $crate::impl_bitset::LevelMasksIterExt<Conf = <Self as $crate::BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            /// Works faster with [TRUSTED_HIERARCHY].
+            ///
+            /// [TRUSTED_HIERARCHY]: crate::bitset_interface::BitSetBase::TRUSTED_HIERARCHY
+            #[inline]
+            fn eq(&self, other: &Rhs) -> bool {
+                $crate::impl_bitset::is_eq(self, other)
+            }
+        }
+
+        impl<$($generics),* ,$(const $consts_name: $consts_ty),*> Eq for $t
+        where
+            $($where_bounds)*
+        {}
+
+
+        // --------------------------------
+        // Debug
+        impl<$($generics),* ,$(const $consts_name: $consts_ty),*> core::fmt::Debug for $t
+        where
+            $($where_bounds)*
+        {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_list().entries(self.iter()).finish()
+            }
+        }
+
+
+        // ---------------------------------
+        // And
+        impl<$($generics),* ,Rhs ,$(const $consts_name: $consts_ty),*> core::ops::BitAnd<Rhs> for &$t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as $crate::BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::And, Self, Rhs>;
+
+            /// Returns intersection of self and rhs bitsets.
+            #[inline]
+            fn bitand(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::And, self, rhs)
+            }
+        }
+
+        // ---------------------------------
+        // Or
+        impl<$($generics),* ,Rhs ,$(const $consts_name: $consts_ty),*> core::ops::BitOr<Rhs> for &$t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as $crate::BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Or, Self, Rhs>;
+
+            /// Returns union of self and rhs bitsets.
+            #[inline]
+            fn bitor(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Or, self, rhs)
+            }
+        }
+
+        // ---------------------------------
+        // Xor
+        impl<$($generics),* ,Rhs ,$(const $consts_name: $consts_ty),*> core::ops::BitXor<Rhs> for &$t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as $crate::BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Xor, Self, Rhs>;
+
+            /// Returns symmetric difference of self and rhs bitsets.
+            #[inline]
+            fn bitxor(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Xor, self, rhs)
+            }
+        }
+
+        // ---------------------------------
+        // Sub
+        impl<$($generics),* ,Rhs  ,$(const $consts_name: $consts_ty),*> core::ops::Sub<Rhs> for &$t
+        where
+            Rhs: $crate::BitSetInterface<Conf = <Self as $crate::BitSetBase>::Conf>,
+            $($where_bounds)*
+        {
+            type Output = $crate::Apply<$crate::ops::Sub, Self, Rhs>;
+
+            /// Returns difference of self and rhs bitsets.
+            ///
+            /// _Or relative complement of rhs in self._
+            #[inline]
+            fn sub(self, rhs: Rhs) -> Self::Output{
+                $crate::apply($crate::ops::Sub, self, rhs)
+            }
+        }
+    };
+}
+pub(crate) use impl_bitset;

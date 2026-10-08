@@ -1,0 +1,20 @@
+[package]
+name = "once_vec"
+version = "0.4.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/vaivaswatha/once_vec"
+categories = ["no-std", "data-structures"]
+keywords = ["no-std", "oncecell", "vector"]
+description = "Safe grow-only vector based on OnceCell"
+
+[dependencies]
+
+[dev-dependencies]
+appendlist = "1.4.0"
+criterion = "0.5.1"
+elsa = "1.11.2"
+
+[[bench]]
+name = "comparison"
+harness = false

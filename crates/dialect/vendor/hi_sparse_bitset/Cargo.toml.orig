@@ -1,0 +1,90 @@
+[package]
+name = "hi_sparse_bitset"
+authors = ["Andrey Didukh <tower120@gmail.com>"]
+license = "MIT OR Apache-2.0"
+version = "0.10.0"
+edition = "2021"
+rust-version = "1.95"
+repository = "https://github.com/tower120/hi_sparse_bitset"
+keywords = ["hierarchical", "sparse", "bitset", "container", "zero-copy"]
+categories = ["data-structures", "no-std"]
+description = "Hierarchical sparse bitset. Incredibly high performance. Compact memory usage."
+exclude = ["/doc/images", "/.github"]
+
+[features]
+default = ["std", "simd"]
+# Stream serialization and `serde` use std::io; core bitsets require only alloc.
+std = []
+# simd bitblocks support (128,256 bit configs)
+simd = ["dep:wide"]
+# `serde` support. Currently requires `std`.
+serde = ["std", "dep:serde", "dep:base64", "dep:arrayvec", "wide?/serde"]
+
+[dependencies]
+wide = { version = "1.7", default-features = false, optional = true }
+serde = { version = "1.0", features = ["serde_derive"], optional = true }
+arrayvec = { version = "0.7", optional = true }
+base64 = { version = "0.23", optional = true }
+
+[dev-dependencies]
+anyhow = "1"
+tempfile = "3.27"
+serde_json = "1.0"
+bincode = { version = "2.0", features = ["serde"] }
+rand = "0.10.1"
+itertools = {version="0.15", default-features = false}
+criterion = "0.5.1"
+memmap2 = "0.9.10"
+aligned-vec = "0.6.4"
+# for benchmarks
+hibitset = "0.6.4"
+roaring = "0.10.2"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = [
+    'cfg(hisparsebitset_test_NoCache)',
+    'cfg(hisparsebitset_test_FixedCache)',
+    'cfg(hisparsebitset_test_DynamicCache)',
+
+    'cfg(hisparsebitset_test_64)',
+    'cfg(hisparsebitset_test_128)',
+    'cfg(hisparsebitset_test_256)',
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "usage"
+required-features = ["simd"]
+
+[[example]]
+name = "traverse_w_cursor"
+required-features = ["simd"]
+
+[[bench]]
+name = "iteration_bench"
+path = "benches/iteration.rs"
+harness = false
+
+[[bench]]
+name = "intersection_bench"
+path = "benches/intersection.rs"
+harness = false
+
+[[bench]]
+name = "union_bench"
+path = "benches/union.rs"
+harness = false
+
+[[bench]]
+name = "insert_bench"
+path = "benches/insert.rs"
+harness = false
+
+[[bench]]
+name = "deserialize"
+path = "benches/deserialize.rs"
+harness = false

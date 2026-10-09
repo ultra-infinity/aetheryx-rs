@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 dialect = { path = "../dialect" }
+pliron = "0.19.0"
 rnix = "0.14.0"
-anyhow = "1.0"
+miette = { version = "7.6.0", features = ["fancy"] }

@@ -1,0 +1,1 @@
+{ and = false; arith = 3; concatLists = [ 1 2 3 ]; concatStrings = "foobar"; equal = true; floatDiv = 3.5; greater = false; greaterEq = true; implies = true; lessEq = true; lessThan = true; negate = 2; not = true; notEqual = true; or = true; shortCircuitAnd = false; shortCircuitOr = true; update = { a = 1; b = 2; c = 3; }; }

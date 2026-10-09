@@ -1,31 +1,15 @@
 //! Tests of the AST to HIR lowering. Expected results come from Nix 2.28.
 
 use miette::{Diagnostic, SourceSpan};
-use pliron::builtin::attributes::ATTR_KEY_GIVEN_NAMES;
-use pliron::irfmt::parsers::spaced;
 use pliron::linked_list::ContainsLinkedList;
-use pliron::operation::{Operation, verify_operation};
-use pliron::parsable::parse_from_str;
 use pliron::printable::Printable;
 
 use super::*;
 use crate::diagnostics::span_of;
-
-/// `sub/test.nix` relative to `/work`, so it resolves to `/work/sub/test.nix`.
-fn test_file(ctx: &Context, src: &str) -> SourceFile {
-    SourceFile::with_cwd(ctx, "sub/test.nix", src, std::path::Path::new("/work")).unwrap()
-}
+use crate::test_util::{self, samples, test_file, try_lower_hir};
 
 fn try_lower(src: &str) -> (Context, std::result::Result<ModuleOp, SourceError>) {
-    let mut ctx = Context::new();
-    let file = test_file(&ctx, src);
-    let parse = ast::Root::parse(src);
-    file.check_parse(parse.errors()).unwrap();
-    let options = LowerOptions {
-        home_dir: Some("/home/u".to_string()),
-    };
-    let res = lower_root_with(&mut ctx, &file, &parse.tree(), &options);
-    (ctx, res)
+    try_lower_hir(src)
 }
 
 fn lower(src: &str) -> String {
@@ -59,53 +43,10 @@ fn entry_op_texts(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// The structure of `op` and everything nested in it, in pre-order: each op's
-/// name, source span and attributes. Value and block names are left out
-/// because pliron renames them when parsing.
-fn structure(ctx: &Context, op: Ptr<Operation>) -> Vec<String> {
-    let opr = op.deref(ctx);
-    let mut attrs: Vec<String> = opr
-        .attributes
-        .0
-        .iter()
-        .filter(|(key, _)| **key != ATTR_KEY_GIVEN_NAMES)
-        .map(|(key, value)| format!("{key}={}", value.disp(ctx)))
-        .collect();
-    attrs.sort();
-    let mut out = vec![format!(
-        "{} {:?} {attrs:?}",
-        Operation::get_opid(op, ctx),
-        span_of(&opr.loc())
-    )];
-    for region in opr.regions() {
-        for block in region.deref(ctx).iter(ctx) {
-            for nested in block.deref(ctx).iter(ctx) {
-                out.extend(structure(ctx, nested));
-            }
-        }
-    }
-    out
-}
-
-/// Lowers `src`, prints the IR, and parses it back with pliron's parser. The
-/// result must verify and have the same structure. This exercises the
-/// textual format of every op and attribute that `src` produces.
 fn assert_round_trips(src: &str) {
     let (mut ctx, res) = try_lower(src);
-    let original = res.unwrap().get_operation();
-    let printed = original.disp(&ctx).to_string();
-    let parsed = match parse_from_str(spaced(Operation::top_level_parser()), &mut ctx, &printed) {
-        Ok(op) => op,
-        Err(e) => panic!("cannot parse back:\n{printed}\n{}", e.disp(&ctx)),
-    };
-    if let Err(e) = verify_operation(parsed, &ctx) {
-        panic!("parsed IR does not verify: {}", e.disp(&ctx));
-    }
-    assert_eq!(
-        structure(&ctx, parsed),
-        structure(&ctx, original),
-        "{printed}"
-    );
+    let module = res.unwrap().get_operation();
+    test_util::assert_round_trips(&mut ctx, module);
 }
 
 #[test]
@@ -494,25 +435,6 @@ fn lowers_kitchen_sink() {
     ] {
         assert!(ir.contains(needle), "missing {needle} in:\n{ir}");
     }
-}
-
-/// The `.nix` files in `samples/<dir>` at the root of the repository.
-fn samples(dir: &str) -> Vec<(String, String)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../samples")
-        .join(dir);
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "nix"))
-        .map(|path| {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            (name, std::fs::read_to_string(&path).unwrap())
-        })
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no samples in {}", dir.display());
-    files
 }
 
 #[test]

@@ -1,0 +1,1 @@
+{ defaultUsesFormalResult = 40; defaultUsesLaterFormalGiven = 2; defaultUsesLaterFormalResult = 11; greetCustom = "Hi, nix"; greetDefault = "Hello, nix"; idResult = 7; openResult = 1; partial = 3; wholePrefixResult = [ "a" "z" ]; wholeResult = 6; }

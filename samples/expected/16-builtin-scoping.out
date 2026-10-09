@@ -1,0 +1,1 @@
+{ count = 118; globalBeatsWith = "lambda"; hasMap = true; letShadows = 1; paramShadows = 2; partial = [ 2 3 ]; passed = [ 1 2 3 ]; prefixed = 3; withBuiltins = 3; withProvidesNonGlobal = 1; }

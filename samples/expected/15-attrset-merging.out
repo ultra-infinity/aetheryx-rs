@@ -1,0 +1,1 @@
+{ firstIsRec = { a = { x = 1; y = 1; }; }; inheritMerges = { a = { q = 1; r = 2; }; }; laterRecIgnored = { a = { w = 1; x = 2; z = "outer x"; }; }; literalIntoLiteral = { a = { b = { c = 1; d = 2; }; }; }; pathIntoLiteral = { a = { b = { c = 1; d = 2; }; }; }; paths = { a = { b = 1; c = 2; }; }; }

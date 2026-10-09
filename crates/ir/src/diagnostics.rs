@@ -160,6 +160,15 @@ impl SourceFile {
     }
 
     /// Attaches this file's source to a diagnostic.
+    /// An error in this file at the byte range `span`, if known.
+    pub fn error_at(&self, kind: ErrorKind, span: Option<std::ops::Range<usize>>) -> SourceError {
+        self.error(Diag {
+            kind,
+            span: span.map(SourceSpan::from),
+            secondary: Vec::new(),
+        })
+    }
+
     pub(crate) fn error(&self, diag: Diag) -> SourceError {
         SourceError {
             kind: diag.kind,
@@ -290,6 +299,9 @@ pub enum ErrorKind {
     DynamicAttrNotAllowed(&'static str),
     #[error("cannot resolve '{0}': the home directory is unknown")]
     NoHomeDir(String),
+    /// An evaluation error; the message is Nix's.
+    #[error("{0}")]
+    Eval(String),
     #[error("IR verification failed: {0}")]
     Verify(String),
 }
@@ -307,6 +319,7 @@ impl ErrorKind {
             ErrorKind::UndefinedVariable(_) => "nix::undefined_variable",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
             ErrorKind::NoHomeDir(_) => "nix::no_home_dir",
+            ErrorKind::Eval(_) => "nix::eval",
             ErrorKind::Verify(_) => "nix::ir::verify",
         }
     }
@@ -318,7 +331,7 @@ impl ErrorKind {
                  but plain values cannot be",
             ),
             ErrorKind::DynamicAttrNotAllowed(_) => Some("use a static name here"),
-            ErrorKind::Verify(_) => Some("this is a bug in the AST lowering"),
+            ErrorKind::Verify(_) => Some("this is a bug in the compiler"),
             _ => None,
         }
     }

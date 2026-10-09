@@ -23,13 +23,13 @@
 use std::hash::{Hash, Hasher};
 
 use pliron::basic_block::BasicBlock;
-use pliron::builtin::attributes::{BoolAttr, StringAttr};
+use pliron::builtin::attributes::StringAttr;
 use pliron::builtin::op_interfaces::{
     IsTerminatorInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
     NoTerminatorInterface, SingleBlockRegionInterface,
 };
 use pliron::combine::parser::char::{char as token_char, spaces};
-use pliron::combine::{Parser, between, many1, satisfy, sep_by};
+use pliron::combine::{Parser, between, many1, optional, satisfy, sep_by};
 use pliron::context::{Context, Ptr};
 use pliron::derive::{pliron_attr, pliron_op, pliron_type};
 use pliron::irfmt::parsers::quoted_string_parser;
@@ -165,12 +165,13 @@ pub enum InterpKind {
     Path,
 }
 
-/// The formal argument names of a `{ a, b ? x, ... }` pattern, in order.
-#[pliron_attr(name = "nix_hir.formal_names", verifier = "succ")]
+/// A list of names, printed as `["a", "b"]`: the formals of a
+/// `{ a, b ? x, ... }` pattern, or the static keys of an attribute set.
+#[pliron_attr(name = "nix_hir.name_list", verifier = "succ")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FormalNames(pub Vec<String>);
+pub struct NameList(pub Vec<String>);
 
-impl Printable for FormalNames {
+impl Printable for NameList {
     fn fmt(
         &self,
         ctx: &Context,
@@ -188,7 +189,7 @@ impl Printable for FormalNames {
     }
 }
 
-impl Parsable for FormalNames {
+impl Parsable for NameList {
     type Arg = ();
     type Parsed = Self;
 
@@ -201,7 +202,93 @@ impl Parsable for FormalNames {
                 token_char(',').skip(spaces()),
             ),
         )
-        .map(FormalNames)
+        .map(NameList)
+        .parse_stream(state_stream)
+        .into()
+    }
+}
+
+/// A `{ a, b ? x, ... }` pattern: the formals in order, whether each has a
+/// default, and whether there is an ellipsis. Printed like the pattern
+/// without default values: `{ a, b ?, ... }`.
+#[pliron_attr(name = "nix_hir.formals_spec", verifier = "succ")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FormalsSpec {
+    /// `(name, has_default)`, in declaration order.
+    pub formals: Vec<(String, bool)>,
+    pub ellipsis: bool,
+}
+
+impl Printable for FormalsSpec {
+    fn fmt(
+        &self,
+        _ctx: &Context,
+        _state: &printable::State,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        let mut items: Vec<String> = self
+            .formals
+            .iter()
+            .map(|(name, has_default)| {
+                if *has_default {
+                    format!("{name} ?")
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        if self.ellipsis {
+            items.push("...".into());
+        }
+        if items.is_empty() {
+            write!(f, "{{ }}")
+        } else {
+            write!(f, "{{ {} }}", items.join(", "))
+        }
+    }
+}
+
+impl Parsable for FormalsSpec {
+    type Arg = ();
+    type Parsed = Self;
+
+    fn parse<'a>(state_stream: &mut StateStream<'a>, _arg: ()) -> ParseResult<'a, Self> {
+        // A formal name is a Nix identifier: [A-Za-z_][A-Za-z0-9_'-]*.
+        let name = many1::<String, _, _>(satisfy(|c: char| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '-')
+        }));
+        let formal = name
+            .skip(spaces())
+            .and(optional(token_char('?').skip(spaces())))
+            .map(|(name, default)| Item::Formal(name, default.is_some()));
+        let ellipsis = pliron::combine::parser::char::string("...")
+            .skip(spaces())
+            .map(|_| Item::Ellipsis);
+        enum Item {
+            Formal(String, bool),
+            Ellipsis,
+        }
+        between(
+            token_char('{').skip(spaces()),
+            token_char('}'),
+            sep_by::<Vec<Item>, _, _, _>(
+                pliron::combine::attempt(ellipsis).or(formal),
+                token_char(',').skip(spaces()),
+            ),
+        )
+        .map(|items| {
+            let mut spec = FormalsSpec {
+                formals: Vec::new(),
+                ellipsis: false,
+            };
+            for item in items {
+                match item {
+                    Item::Formal(name, default) => spec.formals.push((name, default)),
+                    Item::Ellipsis => spec.ellipsis = true,
+                }
+            }
+            spec
+        })
         .parse_stream(state_stream)
         .into()
     }
@@ -324,12 +411,12 @@ pub struct LambdaOp;
     name = "nix_hir.formals",
     // Checks a lambda argument against a `{ a, b ? x, ... }` pattern and
     // returns it unchanged.
-    format = "$0 ` ` attr($formal_names, $FormalNames) ` ellipsis = ` attr($ellipsis, $BoolAttr) ` : ` type($0)",
+    format = "$0 ` ` attr($formals, $FormalsSpec) ` : ` type($0)",
     interfaces = [
         NOpdsInterface<1>,
         NResultsInterface<1>,
     ],
-    attributes = (formal_names: FormalNames, ellipsis: BoolAttr),
+    attributes = (formals: FormalsSpec),
     verifier = "succ"
 )]
 pub struct FormalsOp;
@@ -603,12 +690,11 @@ impl LambdaOp {
 }
 
 impl FormalsOp {
-    pub fn new(ctx: &mut Context, arg: Value, names: Vec<String>, ellipsis: bool) -> Self {
+    pub fn new(ctx: &mut Context, arg: Value, spec: FormalsSpec) -> Self {
         let op = FormalsOp {
             op: new_operation::<Self>(ctx, 1, vec![arg], 0),
         };
-        op.set_attr_formal_names(ctx, FormalNames(names));
-        op.set_attr_ellipsis(ctx, BoolAttr::new(ellipsis));
+        op.set_attr_formals(ctx, spec);
         op
     }
 }
@@ -763,20 +849,49 @@ mod tests {
     }
 
     #[test]
-    fn formal_names_round_trip() {
+    fn name_lists_round_trip() {
         let ctx = &Context::new();
         for names in [
             vec![],
             vec!["a".to_string()],
             vec!["a".into(), "b'".into(), "c-d".into()],
         ] {
-            let names = FormalNames(names);
+            let names = NameList(names);
             assert_eq!(round_trip(&names), names);
         }
-        let printed = FormalNames(vec!["a".into(), "b".into()])
-            .disp(ctx)
-            .to_string();
+        let printed = NameList(vec!["a".into(), "b".into()]).disp(ctx).to_string();
         assert_eq!(printed, r#"["a", "b"]"#);
+    }
+
+    #[test]
+    fn formals_specs_round_trip() {
+        let ctx = &Context::new();
+        let spec = FormalsSpec {
+            formals: vec![
+                ("a".into(), false),
+                ("b'".into(), true),
+                ("c-d".into(), false),
+            ],
+            ellipsis: true,
+        };
+        assert_eq!(spec.disp(ctx).to_string(), "{ a, b' ?, c-d, ... }");
+        assert_eq!(round_trip(&spec), spec);
+        for spec in [
+            FormalsSpec {
+                formals: vec![],
+                ellipsis: false,
+            },
+            FormalsSpec {
+                formals: vec![],
+                ellipsis: true,
+            },
+            FormalsSpec {
+                formals: vec![("x".into(), true)],
+                ellipsis: false,
+            },
+        ] {
+            assert_eq!(round_trip(&spec), spec);
+        }
     }
 
     #[test]

@@ -4,4 +4,6 @@ members = [
     "crates/driver",
     "crates/ir",
     "crates/builtins",
+    "crates/runtime",
+    "crates/eval",
 ]

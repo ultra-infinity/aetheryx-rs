@@ -288,7 +288,8 @@ impl Lowerer<'_> {
             return Ok(match lit {
                 Some(lit) => self.emit_const(block, lit),
                 None => {
-                    let op = RefOp::new(self.ctx, builtin.name);
+                    let ty = ValueType::get(self.ctx).into();
+                    let op = RefOp::new(self.ctx, builtin.name, ty);
                     self.emit(block, op)
                 }
             });

@@ -1,0 +1,1 @@
+{ a = 10; b = 20; dyn = "dynamic"; dyn2 = "dynamic interpolated"; emptySet = { }; nestedSet = { inner = { deeper = "value"; }; }; "quoted key" = "ok"; services = { nginx = { enable = true; port = 80; }; ssh = { enable = false; }; }; with-dash = 1; x = 1; y = 2; }

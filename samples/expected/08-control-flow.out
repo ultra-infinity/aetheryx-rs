@@ -1,0 +1,1 @@
+{ asserted = 42; ifLazy = "ok"; ifTrue = "yes"; nestedIf = 2; nestedWith = 5; withBuiltins = 3; withDoesNotShadow = "from let"; withScope = "from with"; }

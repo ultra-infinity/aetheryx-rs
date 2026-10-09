@@ -1,0 +1,1 @@
+{ attrNames = [ "a" "b" ]; filtered = [ 2 3 ]; folded = 10; mapped = [ 2 4 6 ]; parentDir = @ROOT@/samples; pos = { column = 9; file = "@ROOT@/samples/valid/10-builtins-and-paths.nix"; line = 3; }; selfPath = @ROOT@/samples/valid/10-builtins-and-paths.nix; toStr = "1 two"; typeOfs = [ "int" "float" "string" "path" "bool" "null" "list" "set" "lambda" ]; }

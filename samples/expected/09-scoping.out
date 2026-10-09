@@ -1,0 +1,1 @@
+{ inheritFrom = "from set"; inheritOuter = "let x"; letShadowsParam = "inner let"; nonRecOuter = "let x"; paramShadowsLet = "param"; recSelf = 3; shadowTrue = 1; withVsParam = "param"; }

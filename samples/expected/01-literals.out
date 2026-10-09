@@ -1,0 +1,1 @@
+{ absPath = /etc/hosts; emptyString = ""; escapes = "tab:\t newline:\n quote:\" dollar:\${not-interpolated}"; exponent = 1500; float = 3.14; homePath = @HOME@/.config; int = 42; multiline = "first line\n  indented line\n\${not-interpolated}\n"; no = false; nothing = null; relPath = @ROOT@/samples/valid/01-literals.nix; string = "hello"; uri = "https://nixos.org"; yes = true; }

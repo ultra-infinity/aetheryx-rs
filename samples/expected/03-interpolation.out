@@ -1,0 +1,1 @@
+{ greeting = "hello world!"; indented = "Hello, world.\nCount: 4\n"; nested = "outer inner world"; number = "n = 3"; onlyInterpolation = "world"; path = @ROOT@/samples/valid/sub/file.txt; }

@@ -1,0 +1,1 @@
+{ dynamicSelect = "deep"; has = true; hasDynamic = true; hasMissing = false; hasPath = true; orHit = "deep"; orMissing = "default"; orNonAttrset = "default"; quotedSelect = "deep"; select = "deep"; }

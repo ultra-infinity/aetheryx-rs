@@ -13,7 +13,7 @@ use rowan::ast::AstNode;
 use super::{Binding, Lowerer, Result, ident_name};
 use crate::diagnostics::{Diag, ErrorKind};
 use crate::hir::{
-    BindOp, FormalsOp, HasAttrOp, LambdaOp, LetInOp, SelectOp, add_region_block,
+    BindOp, FormalsOp, FormalsSpec, HasAttrOp, LambdaOp, LetInOp, SelectOp, add_region_block,
     add_region_block_with_args, result_of,
 };
 
@@ -116,8 +116,14 @@ impl Lowerer<'_> {
             }
             None => self.name_value(arg, "arg"),
         }
-        let names = formals.iter().map(|(n, _, _)| n.clone()).collect();
-        let checked = FormalsOp::new(self.ctx, arg, names, pattern.ellipsis_token().is_some());
+        let spec = FormalsSpec {
+            formals: formals
+                .iter()
+                .map(|(name, default, _)| (name.clone(), default.is_some()))
+                .collect(),
+            ellipsis: pattern.ellipsis_token().is_some(),
+        };
+        let checked = FormalsOp::new(self.ctx, arg, spec);
         let checked = self.emit(block, checked);
 
         let (plain, defaulted): (Vec<_>, Vec<_>) =

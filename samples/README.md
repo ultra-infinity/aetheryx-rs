@@ -11,15 +11,29 @@ Test inputs for the driver. Every file has been checked against Nix 2.28.3.
 ## Running
 
 ```sh
-# Lower to nix_hir and print the IR
+# Evaluate (prints like `nix-instantiate --eval --strict`)
+cargo run -p driver -- eval samples/valid/09-scoping.nix
+
+# Print the IR: nix_hir, or nix_mir
 cargo run -p driver -- hir samples/valid/09-scoping.nix
-cargo run -p driver -- hir --no-locations samples/valid/*.nix
+cargo run -p driver -- mir --no-locations samples/valid/09-scoping.nix
 
 # Show a diagnostic
 cargo run -p driver -- hir samples/invalid/duplicate-attr.nix
 
 # Reference result from real Nix
 nix-instantiate --eval --strict samples/valid/09-scoping.nix
+```
+
+## Expected outputs
+
+`expected/` holds what real Nix prints for every file in `valid/`, with the
+repository root and `$HOME` replaced by `@ROOT@` and `@HOME@`. The `eval`
+crate's oracle test (`crates/eval/tests/samples.rs`) checks that our output is
+identical. Regenerate after adding or changing a sample:
+
+```sh
+samples/gen-expected.sh
 ```
 
 These files need extra arguments to evaluate with real Nix:

@@ -2,8 +2,8 @@
 //! passes ([`pipeline`]):
 //!
 //! 1. [`HirToMir`] (`hir-to-mir`): a pliron dialect conversion. Each op
-//!    converts itself through its [`ToMIRDialect`] implementation, and the
-//!    `nix_hir.value` type through [`ToMIRType`], the way pliron-llvm's
+//!    converts itself through its `ToMIRDialect` implementation, and the
+//!    `nix_hir.value` type through `ToMIRType`, the way pliron-llvm's
 //!    `ToLLVMDialect` / `ToLLVMType` work. Every HIR value becomes a
 //!    `nix_mir.thunk`: ops that cannot fail are computed where they are
 //!    defined, and everything else is suspended there. Names are resolved:
@@ -33,7 +33,7 @@ mod tests;
 
 pub use check::CheckMir;
 pub use closures::ConvertClosures;
-pub use convert::{ConversionState, HirToMir};
+pub use convert::HirToMir;
 pub use elide::ElideThunks;
 
 use pliron::basic_block::BasicBlock;
@@ -42,34 +42,32 @@ use pliron::builtin::type_interfaces::FunctionTypeInterface;
 use pliron::builtin::types::FunctionType;
 use pliron::context::{Context, Ptr};
 use pliron::derive::{op_interface, type_interface};
-use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::linked_list::ContainsLinkedList;
 use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::pass::{AnalysisManager, Pass, Passes};
 use pliron::result::Result;
 use pliron::r#type::{Type, TypeHandle};
+use pliron::value::Value;
 
 use crate::hir;
+use convert::{Builder, ConversionState};
 
-/// Interface for rewriting an op to `nix_mir`, used by [`HirToMir`]. Every
-/// `nix_hir` op implements it, and so do `nix_builtins.ref` (shared by both
-/// IRs) and `builtin.func` (whose signature changes).
+/// Interface for converting an op to `nix_mir`, used by [`HirToMir`] the way
+/// pliron-llvm's `builtin_to_llvm` uses `ToLLVMDialect`. Every `nix_hir` op
+/// implements it, and so do `nix_builtins.ref` (shared by both IRs) and
+/// `builtin.func` (whose signature changes).
+///
+/// Unlike `ToLLVMDialect::rewrite`, an implementation only builds the MIR
+/// for its op and says what replaces the op; the conversion replaces or
+/// erases it. It also gets the [`ConversionState`]: converting a name needs
+/// the scope it is resolved in, which an op cannot see once the ops around
+/// it are converted.
 #[op_interface]
-pub trait ToMIRDialect {
-    /// Rewrites `self` to `nix_mir`. The rewriter's insertion point is
-    /// before `self`, and the definitions of its operands are converted.
-    ///
-    /// Unlike pliron-llvm's `ToLLVMDialect`, this takes the
-    /// [`ConversionState`]: converting a name needs the scope it is resolved
-    /// in, which an op cannot see once the ops around it are converted.
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()>;
+pub(crate) trait ToMIRDialect {
+    /// Builds the MIR for `self` with `b`, whose insertion point is before
+    /// `self`. The definitions of `self`'s operands are already converted.
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered>;
 
     fn verify(_op: &dyn Op, _ctx: &Context) -> Result<()>
     where
@@ -79,9 +77,19 @@ pub trait ToMIRDialect {
     }
 }
 
+/// What replaces an op converted by [`ToMIRDialect`].
+pub(crate) enum Lowered {
+    /// The thunk that replaces its result.
+    Value(Value),
+    /// Nothing: the op has no result.
+    Erased,
+    /// The op itself, changed in place or left as it is.
+    InPlace,
+}
+
 /// Interface for converting a type to `nix_mir`, used by [`HirToMir`].
 #[type_interface]
-pub trait ToMIRType {
+pub(crate) trait ToMIRType {
     /// Converts `self` to a `nix_mir` type.
     fn convert(&self, ctx: &Context) -> Result<TypeHandle>;
 

@@ -4,10 +4,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use pliron::basic_block::BasicBlock;
 use pliron::context::{Context, Ptr};
 use pliron::linked_list::ContainsLinkedList;
 use pliron::operation::Operation;
-use pliron::value::DefiningEntity;
+use pliron::value::{DefiningEntity, Value};
 
 use super::region_block;
 use crate::hir;
@@ -19,8 +20,9 @@ pub(super) struct Scopes {
     /// The `nix_hir.with` ops enclosing each `nix_hir.lookup`, innermost
     /// first.
     pub withs: HashMap<Ptr<Operation>, Vec<Ptr<Operation>>>,
-    /// The binding each lambda is the value of (`f = x: ...;`), which Nix
-    /// names it after in error messages.
+    /// The binding each lambda is named after in Nix's error messages: the
+    /// one it is the value of (`f = x: ...;`), also for the lambdas that are
+    /// directly the bodies of such a lambda (`f = x: y: ...;`).
     pub lambda_names: HashMap<Ptr<Operation>, String>,
 }
 
@@ -59,6 +61,52 @@ pub(super) fn bind_name(ctx: &Context, bind: hir::BindOp) -> String {
         .to_string()
 }
 
+/// The `nix_hir.lambda` defining `value`, if any.
+fn lambda_of(ctx: &Context, value: Value) -> Option<Ptr<Operation>> {
+    match value.defining_entity() {
+        DefiningEntity::Op(def) if Operation::get_op::<hir::LambdaOp>(def, ctx).is_some() => {
+            Some(def)
+        }
+        _ => None,
+    }
+}
+
+/// The lambda that is directly the body of `lambda`, as Nix passes a
+/// lambda's name on to it (`ExprLambda::setName`).
+///
+/// With defaulted formals, the body is inside the `nix_hir.let_in` that
+/// [`crate::ast_to_hir`] binds them in, which the region yields; a `let`
+/// written in the source is inside that one, and is not looked through.
+fn body_lambda(ctx: &Context, lambda: Ptr<Operation>) -> Option<Ptr<Operation>> {
+    let block = region_block(ctx, lambda, 0);
+    let has_defaults = block
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<hir::FormalsOp>(op, ctx))
+        .any(|formals| {
+            formals
+                .get_attr_formals(ctx)
+                .is_some_and(|spec| spec.formals.iter().any(|&(_, default)| default))
+        });
+    let mut body = yielded(ctx, block);
+    if has_defaults {
+        let DefiningEntity::Op(formals_let) = body.defining_entity() else {
+            unreachable!("defaulted formals are bound in a nix_hir.let_in")
+        };
+        body = yielded(ctx, region_block(ctx, formals_let, 1));
+    }
+    lambda_of(ctx, body)
+}
+
+/// The value `block` yields.
+fn yielded(ctx: &Context, block: Ptr<BasicBlock>) -> Value {
+    let ret = block
+        .deref(ctx)
+        .get_terminator(ctx)
+        .expect("value regions end in nix_hir.yield");
+    ret.deref(ctx).get_operand(0)
+}
+
 struct Walker<'a> {
     ctx: &'a Context,
     /// The enclosing `let_in` / `rec_attr_set` ops and the names they bind,
@@ -88,11 +136,13 @@ impl Walker<'_> {
         } else if Operation::get_op::<hir::LookupOp>(op, ctx).is_some() {
             let withs = self.withs.iter().rev().copied().collect();
             self.scopes.withs.insert(op, withs);
-        } else if let Some(bind) = Operation::get_op::<hir::BindOp>(op, ctx)
-            && let DefiningEntity::Op(def) = op.deref(ctx).get_operand(0).defining_entity()
-            && Operation::get_op::<hir::LambdaOp>(def, ctx).is_some()
-        {
-            self.scopes.lambda_names.insert(def, bind_name(ctx, bind));
+        } else if let Some(bind) = Operation::get_op::<hir::BindOp>(op, ctx) {
+            let name = bind_name(ctx, bind);
+            let mut lambda = lambda_of(ctx, op.deref(ctx).get_operand(0));
+            while let Some(named) = lambda {
+                self.scopes.lambda_names.insert(named, name.clone());
+                lambda = body_lambda(ctx, named);
+            }
         }
 
         let is_binder = bound_names(ctx, op)

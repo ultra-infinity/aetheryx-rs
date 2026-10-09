@@ -142,6 +142,35 @@ fn scoping() {
 }
 
 #[test]
+fn lambdas_are_named_like_nix() {
+    // Nix passes a binding's name on to a lambda that is directly the body
+    // of the named one, through formals but not through `let` or `if`.
+    let missing_x = |name: &str| format!("function '{name}' called without required argument 'x'");
+    for (src, name) in [
+        ("let h = y: { x }: x; in h 1 {}", "h"),
+        ("let h = { a }: { x }: x; in h { a = 1; } {}", "h"),
+        ("let h = { a ? 1 }: { x }: x; in h {} {}", "h"),
+        ("let h = { a ? 1 }@args: { x }: x; in h {} {}", "h"),
+        ("let h = y: z: { x }: x; in h 1 2 {}", "h"),
+        ("{ f = a: b: { x }: x; }.f 1 2 {}", "f"),
+        (
+            "let h = y: let q = 1; in { x }: x; in h 1 {}",
+            "anonymous lambda",
+        ),
+        (
+            "let h = { a ? 1 }: let q = 1; in { x }: x; in h {} {}",
+            "anonymous lambda",
+        ),
+        (
+            "let h = y: if true then { x }: x else 1; in h 1 {}",
+            "anonymous lambda",
+        ),
+    ] {
+        assert_eq!(err(src), missing_x(name), "{src}");
+    }
+}
+
+#[test]
 fn bindings_resolve_like_nix() {
     for (src, expected) in [
         ("let a = b; b = 1; in a", "1"),

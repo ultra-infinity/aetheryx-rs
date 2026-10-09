@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use pliron::basic_block::BasicBlock;
 use pliron::context::{Context, Ptr};
 use pliron::derive::op_interface_impl;
-use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::irbuild::rewriter::Rewriter;
 use pliron::linked_list::ContainsLinkedList;
 use pliron::location::Located;
@@ -18,89 +17,55 @@ use pliron::region::Region;
 use pliron::result::Result;
 use pliron::value::Value;
 
-use super::convert::{Builder, ConversionState, converted_with_parent};
+use super::convert::{Builder, ConversionState};
 use super::scopes::{Scopes, bind_name};
-use super::{ToMIRDialect, region_block};
+use super::{Lowered, ToMIRDialect, region_block};
 use crate::hir::{self, BinOp};
 use crate::mir;
 
 /// `let ... in body`: a thunk computing the group, then the body.
 #[op_interface_impl]
 impl ToMIRDialect for hir::LetInOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+        let (bindings, body) = (b.region(0), b.region(1));
         let op = self.get_operation();
-        let (bindings, body) = (region_block(ctx, op, 0), region_block(ctx, op, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk(|b| {
+        Ok(Lowered::Value(b.thunk(|b| {
             let group = Recursive::build(b, bindings);
             b.move_ops(body);
             group.resolve(b, &state.scopes, op);
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::AttrSetOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = attr_set(&mut b, &state.scopes, self.get_operation(), false);
-        b.replace(thunk)
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+        let set = attr_set(b, &state.scopes, self.get_operation(), false);
+        Ok(Lowered::Value(set))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::RecAttrSetOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = attr_set(&mut b, &state.scopes, self.get_operation(), true);
-        b.replace(thunk)
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+        let set = attr_set(b, &state.scopes, self.get_operation(), true);
+        Ok(Lowered::Value(set))
     }
 }
 
 /// Converted with its set or `let`.
 #[op_interface_impl]
 impl ToMIRDialect for hir::BindOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        _rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        converted_with_parent(ctx, self)
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        b.converted_with_parent()
     }
 }
 
 /// Converted with its set.
 #[op_interface_impl]
 impl ToMIRDialect for hir::DynBindOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        _rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        converted_with_parent(ctx, self)
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        b.converted_with_parent()
     }
 }
 
@@ -108,14 +73,8 @@ impl ToMIRDialect for hir::DynBindOp {
 /// member of the group.
 #[op_interface_impl]
 impl ToMIRDialect for hir::VarOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        _rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        converted_with_parent(ctx, self)
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        b.converted_with_parent()
     }
 }
 

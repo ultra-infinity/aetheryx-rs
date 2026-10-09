@@ -46,15 +46,15 @@ use pliron::r#type::{TypeHandle, type_cast, type_impls};
 use pliron::value::Value;
 
 use super::scopes::Scopes;
-use super::{ToMIRDialect, ToMIRType, is_hir_type};
+use super::{Lowered, ToMIRDialect, ToMIRType, is_hir_type, region_block};
 use crate::hir;
 use crate::mir::{self, Ty};
 
-/// Converts every op implementing [`ToMIRDialect`] (all of `nix_hir`, and
+/// Converts every op implementing `ToMIRDialect` (all of `nix_hir`, and
 /// `@main`'s signature) to `nix_mir`.
 ///
 /// This is a [`Pass`] of its own rather than pliron's `PassWrapper`, because
-/// the [`ConversionState`] is computed from the module being converted.
+/// the `ConversionState` is computed from the module being converted.
 pub struct HirToMir;
 
 impl Pass for HirToMir {
@@ -83,7 +83,7 @@ impl Pass for HirToMir {
 /// What converting an op needs to know beyond the op itself: how the names
 /// of the module are scoped, which the conversion of the ops around it
 /// removes.
-pub struct ConversionState {
+pub(crate) struct ConversionState {
     /// Computed on the HIR before it changes.
     pub(super) scopes: Scopes,
     /// The namespace of each converted `nix_hir.with`.
@@ -116,12 +116,18 @@ impl DialectConversion for HirToMirConversion {
         ctx: &mut Context,
         rewriter: &mut DialectConversionRewriter,
         op: Ptr<Operation>,
-        operands_info: &OperandsInfo,
+        _operands_info: &OperandsInfo,
     ) -> Result<()> {
         let op_dyn = Operation::get_op_dyn(op, ctx);
         let to_mir =
             op_cast::<dyn ToMIRDialect>(op_dyn.op_ref()).expect("checked by can_convert_op");
-        to_mir.rewrite(ctx, rewriter, operands_info, &mut self.state)
+        let mut b = Builder::new(ctx, rewriter, op);
+        match to_mir.to_mir(&mut b, &mut self.state)? {
+            Lowered::Value(thunk) => rewriter.replace_operation_with_values(ctx, op, vec![thunk]),
+            Lowered::Erased => rewriter.erase_operation(ctx, op),
+            Lowered::InPlace => {}
+        }
+        Ok(())
     }
 }
 
@@ -160,19 +166,9 @@ impl ToMIRType for FunctionType {
     }
 }
 
-/// The error for an op that the op containing it converts (a binding, or a
-/// name), reached on its own.
-pub(super) fn converted_with_parent(ctx: &Context, op: &impl Op) -> Result<()> {
-    input_err!(
-        op.loc(ctx),
-        "{} is converted with the op that contains it",
-        Operation::get_opid(op.get_operation(), ctx)
-    )
-}
-
 /// Builds MIR for the HIR op being converted, at the rewriter's insertion
 /// point, located at the HIR op.
-pub(super) struct Builder<'a> {
+pub(crate) struct Builder<'a> {
     pub ctx: &'a mut Context,
     pub rewriter: &'a mut DialectConversionRewriter,
     /// The HIR op being converted.
@@ -181,31 +177,43 @@ pub(super) struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    pub fn new(
+    fn new(
         ctx: &'a mut Context,
         rewriter: &'a mut DialectConversionRewriter,
-        op: &impl Op,
+        op: Ptr<Operation>,
     ) -> Self {
-        let loc = op.loc(ctx);
+        let loc = op.deref(ctx).loc();
         Builder {
             ctx,
             rewriter,
-            op: op.get_operation(),
+            op,
             loc,
         }
     }
 
-    /// Replaces the result of the HIR op with `thunk`, and erases the op.
-    pub fn replace(self, thunk: Value) -> Result<()> {
-        self.rewriter
-            .replace_operation_with_values(self.ctx, self.op, vec![thunk]);
-        Ok(())
+    /// Operand `i` of the HIR op.
+    pub fn operand(&self, i: usize) -> Value {
+        self.op.deref(self.ctx).get_operand(i)
     }
 
-    /// Erases the HIR op, which has no results.
-    pub fn erase(self) -> Result<()> {
-        self.rewriter.erase_operation(self.ctx, self.op);
-        Ok(())
+    /// The operands of the HIR op.
+    pub fn operands(&self) -> Vec<Value> {
+        self.op.deref(self.ctx).operands().collect()
+    }
+
+    /// The single block of region `i` of the HIR op.
+    pub fn region(&self, i: usize) -> Ptr<BasicBlock> {
+        region_block(self.ctx, self.op, i)
+    }
+
+    /// The error for an op that the op containing it converts (a binding, or
+    /// a name), reached on its own.
+    pub fn converted_with_parent(&self) -> Result<Lowered> {
+        input_err!(
+            self.loc.clone(),
+            "{} is converted with the op that contains it",
+            Operation::get_opid(self.op, self.ctx)
+        )
     }
 
     /// Inserts `op` at the insertion point; the insertion point stays after it.

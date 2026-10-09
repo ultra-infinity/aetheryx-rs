@@ -4,9 +4,7 @@
 
 use pliron::builtin::attributes::TypeAttr;
 use pliron::builtin::ops::FuncOp;
-use pliron::context::Context;
 use pliron::derive::op_interface_impl;
-use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::irbuild::rewriter::Rewriter;
 use pliron::op::Op;
 use pliron::result::Result;
@@ -14,39 +12,23 @@ use pliron::r#type::{Typed, type_cast};
 use pliron::value::Value;
 
 use super::convert::{Builder, ConversionState};
-use super::{ToMIRDialect, ToMIRType, is_hir_type, region_block};
+use super::{Lowered, ToMIRDialect, ToMIRType, is_hir_type};
 use crate::builtins_dialect::RefOp;
 use crate::hir::{self, BinOp};
 use crate::mir::{self, Ty};
-
-fn operand(ctx: &Context, op: &impl Op, i: usize) -> Value {
-    op.get_operation().deref(ctx).get_operand(i)
-}
-
-fn operands(ctx: &Context, op: &impl Op) -> Vec<Value> {
-    op.get_operation().deref(ctx).operands().collect()
-}
 
 // ─── Trivial and eager ops ──────────────────────────────────────────────────
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::ConstOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
         let literal = self
-            .get_attr_literal(ctx)
+            .get_attr_literal(b.ctx)
             .expect("consts have a literal")
             .clone();
-        let mut b = Builder::new(ctx, rewriter, self);
         let constant = mir::ConstOp::new(b.ctx, literal);
         let value = b.value(constant);
-        let thunk = b.evaluated(value);
-        b.replace(thunk)
+        Ok(Lowered::Value(b.evaluated(value)))
     }
 }
 
@@ -54,39 +36,28 @@ impl ToMIRDialect for hir::ConstOp {
 /// converted.
 #[op_interface_impl]
 impl ToMIRDialect for RefOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let ty = self.get_operation().deref(ctx).get_result(0).get_type(ctx);
-        if !is_hir_type(ctx, ty) {
-            return Ok(());
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let ty = self
+            .get_operation()
+            .deref(b.ctx)
+            .get_result(0)
+            .get_type(b.ctx);
+        if !is_hir_type(b.ctx, ty) {
+            return Ok(Lowered::InPlace);
         }
-        let name = self.builtin(ctx).expect("verified").name;
-        let mut b = Builder::new(ctx, rewriter, self);
+        let name = self.builtin(b.ctx).expect("verified").name;
         let value_ty = Ty::Value.handle(b.ctx);
         let reference = RefOp::new(b.ctx, name, value_ty);
         let value = b.value(reference);
-        let thunk = b.evaluated(value);
-        b.replace(thunk)
+        Ok(Lowered::Value(b.evaluated(value)))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::LambdaOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
-        let hir_body = region_block(ctx, self.get_operation(), 0);
-        let hir_arg = hir_body.deref(ctx).get_argument(0);
-        let mut b = Builder::new(ctx, rewriter, self);
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+        let hir_body = b.region(0);
+        let hir_arg = hir_body.deref(b.ctx).get_argument(0);
         let lambda = mir::LambdaOp::new(b.ctx);
         if let Some(name) = state.scopes.lambda_names.get(&self.get_operation()) {
             lambda.set_name(b.ctx, name);
@@ -97,32 +68,22 @@ impl ToMIRDialect for hir::LambdaOp {
         let body = lambda.body(b.ctx);
         b.at_end_of(body, |b| b.move_ops(hir_body));
         let value = mir::result_of(b.ctx, &lambda);
-        let thunk = b.evaluated(value);
-        b.replace(thunk)
+        Ok(Lowered::Value(b.evaluated(value)))
     }
 }
 
 /// Eager: Nix checks the pattern when the function is called.
 #[op_interface_impl]
 impl ToMIRDialect for hir::FormalsOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
         let spec = self
-            .get_attr_formals(ctx)
+            .get_attr_formals(b.ctx)
             .expect("formals have a pattern")
             .clone();
-        let arg = operand(ctx, self, 0);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let arg = b.force(arg);
+        let arg = b.force(b.operand(0));
         let checked = mir::FormalsOp::new(b.ctx, arg, spec);
         let value = b.value(checked);
-        let thunk = b.evaluated(value);
-        b.replace(thunk)
+        Ok(Lowered::Value(b.evaluated(value)))
     }
 }
 
@@ -130,102 +91,64 @@ impl ToMIRDialect for hir::FormalsOp {
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::ApplyOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let (func, arg) = (operand(ctx, self, 0), operand(ctx, self, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let (func, arg) = (b.operand(0), b.operand(1));
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let func = b.force(func);
             let call = mir::CallOp::new(b.ctx, func, arg);
             b.value(call)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::SelectOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let (set, key) = (operand(ctx, self, 0), operand(ctx, self, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let (set, key) = (b.operand(0), b.operand(1));
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let set = b.force(set);
             let key = b.force(key);
             let select = mir::SelectOp::new(b.ctx, set, key);
             let attr = b.value(select);
             b.force(attr)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::HasAttrOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let (set, key) = (operand(ctx, self, 0), operand(ctx, self, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let (set, key) = (b.operand(0), b.operand(1));
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let set = b.force(set);
             let key = b.force(key);
             let has_attr = mir::HasAttrOp::new(b.ctx, set, key);
             b.value(has_attr)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::UnaryOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let unop = *self.get_attr_unop(ctx).expect("has an operator");
-        let arg = operand(ctx, self, 0);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let unop = *self.get_attr_unop(b.ctx).expect("has an operator");
+        let arg = b.operand(0);
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let arg = b.force(arg);
             let unary = mir::UnaryOp::new(b.ctx, unop, arg);
             b.value(unary)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::BinaryOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let binop = *self.get_attr_binop(ctx).expect("has an operator");
-        let (lhs, rhs) = (operand(ctx, self, 0), operand(ctx, self, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| binary_value(b, binop, lhs, rhs));
-        b.replace(thunk)
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let binop = *self.get_attr_binop(b.ctx).expect("has an operator");
+        let (lhs, rhs) = (b.operand(0), b.operand(1));
+        Ok(Lowered::Value(
+            b.thunk_of(|b| binary_value(b, binop, lhs, rhs)),
+        ))
     }
 }
 
@@ -267,56 +190,34 @@ fn binary_value(b: &mut Builder, binop: BinOp, lhs: Value, rhs: Value) -> Value 
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::InterpolateOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let kind = *self.get_attr_interp_kind(ctx).expect("has a kind");
-        let parts = operands(ctx, self);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let kind = *self.get_attr_interp_kind(b.ctx).expect("has a kind");
+        let parts = b.operands();
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let parts = parts.into_iter().map(|part| b.force(part)).collect();
             let interp = mir::InterpolateOp::new(b.ctx, kind, parts);
             b.value(interp)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::ListOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let items = operands(ctx, self);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let items = b.operands();
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let list = mir::ListOp::new(b.ctx, items);
             b.value(list)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 /// Searches the namespaces of the enclosing `with` ops, innermost first.
 #[op_interface_impl]
 impl ToMIRDialect for hir::LookupOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
         let name = self
-            .get_attr_lookup_name(ctx)
+            .get_attr_lookup_name(b.ctx)
             .expect("lookups are named")
             .as_str()
             .to_string();
@@ -326,13 +227,11 @@ impl ToMIRDialect for hir::LookupOp {
             .iter()
             .map(|with| state.namespaces[with])
             .collect();
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let lookup = mir::WithLookupOp::new(b.ctx, &name, namespaces);
             let found = b.value(lookup);
             b.force(found)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
@@ -340,18 +239,9 @@ impl ToMIRDialect for hir::LookupOp {
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::IfOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let cond = operand(ctx, self, 0);
-        let op = self.get_operation();
-        let (then_hir, else_hir) = (region_block(ctx, op, 0), region_block(ctx, op, 1));
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk_of(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let (cond, then_hir, else_hir) = (b.operand(0), b.region(0), b.region(1));
+        Ok(Lowered::Value(b.thunk_of(|b| {
             let cond = b.force(cond);
             let if_op = mir::IfOp::new(b.ctx, cond);
             b.insert(&if_op);
@@ -360,88 +250,55 @@ impl ToMIRDialect for hir::IfOp {
             let else_block = if_op.else_block(b.ctx);
             b.at_end_of(else_block, |b| b.move_ops(else_hir));
             mir::result_of(b.ctx, &if_op)
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::AssertOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let cond = operand(ctx, self, 0);
-        let body = region_block(ctx, self.get_operation(), 0);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk(|b| {
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let (cond, body) = (b.operand(0), b.region(0));
+        Ok(Lowered::Value(b.thunk(|b| {
             let cond = b.force(cond);
             let assert = mir::AssertOp::new(b.ctx, cond);
             b.insert(&assert);
             // The body's `nix_hir.yield` becomes the thunk's terminator.
             b.move_ops(body);
-        });
-        b.replace(thunk)
+        })))
     }
 }
 
 /// Records the namespace for the lookups in the body.
 #[op_interface_impl]
 impl ToMIRDialect for hir::WithOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        state: &mut ConversionState,
-    ) -> Result<()> {
-        let namespace = operand(ctx, self, 0);
-        state.namespaces.insert(self.get_operation(), namespace);
-        let body = region_block(ctx, self.get_operation(), 0);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let thunk = b.thunk(|b| b.move_ops(body));
-        b.replace(thunk)
+    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+        state.namespaces.insert(self.get_operation(), b.operand(0));
+        let body = b.region(0);
+        Ok(Lowered::Value(b.thunk(|b| b.move_ops(body))))
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::YieldOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let value = operand(ctx, self, 0);
-        let mut b = Builder::new(ctx, rewriter, self);
-        let value = b.force(value);
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let value = b.force(b.operand(0));
         b.yield_(value);
-        b.erase()
+        Ok(Lowered::Erased)
     }
 }
 
 /// Converts the signature (see the [`ToMIRType`] of `builtin.function`).
 #[op_interface_impl]
 impl ToMIRDialect for FuncOp {
-    fn rewrite(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        _operands_info: &OperandsInfo,
-        _state: &mut ConversionState,
-    ) -> Result<()> {
-        let ty = self.get_type(ctx);
-        let converted = type_cast::<dyn ToMIRType>(&*ty.deref(ctx))
+    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+        let ty = self.get_type(b.ctx);
+        let converted = type_cast::<dyn ToMIRType>(&*ty.deref(b.ctx))
             .expect("function types convert to MIR")
-            .convert(ctx)?;
+            .convert(b.ctx)?;
         if converted != ty {
-            self.set_attr_builtin_func_type(ctx, TypeAttr::new(converted));
-            rewriter.mark_modified();
+            self.set_attr_builtin_func_type(b.ctx, TypeAttr::new(converted));
+            b.rewriter.mark_modified();
         }
-        Ok(())
+        Ok(Lowered::InPlace)
     }
 }

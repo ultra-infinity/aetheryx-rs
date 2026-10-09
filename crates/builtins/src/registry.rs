@@ -99,10 +99,29 @@ mod tests {
         assert_eq!(
             bare,
             [
-                "abort", "baseNameOf", "break", "builtins", "derivation", "derivationStrict",
-                "dirOf", "false", "fetchGit", "fetchMercurial", "fetchTarball", "fetchTree",
-                "fromTOML", "import", "isNull", "map", "null", "placeholder", "removeAttrs",
-                "scopedImport", "throw", "toString", "true",
+                "abort",
+                "baseNameOf",
+                "break",
+                "builtins",
+                "derivation",
+                "derivationStrict",
+                "dirOf",
+                "false",
+                "fetchGit",
+                "fetchMercurial",
+                "fetchTarball",
+                "fetchTree",
+                "fromTOML",
+                "import",
+                "isNull",
+                "map",
+                "null",
+                "placeholder",
+                "removeAttrs",
+                "scopedImport",
+                "throw",
+                "toString",
+                "true",
             ]
         );
         let names: HashSet<_> = all().iter().map(|b| b.name).collect();
@@ -113,7 +132,10 @@ mod tests {
     fn lookup_global_follows_the_binding_form() {
         assert_eq!(lookup_global("map").map(|b| b.name), Some("map"));
         assert_eq!(lookup_global("__add").map(|b| b.name), Some("add"));
-        assert_eq!(lookup_global("__findFile").map(|b| b.name), Some("findFile"));
+        assert_eq!(
+            lookup_global("__findFile").map(|b| b.name),
+            Some("findFile")
+        );
         assert_eq!(lookup_global("add"), None);
         assert_eq!(lookup_global("length"), None);
         // Bare globals are not also bound with the prefix.

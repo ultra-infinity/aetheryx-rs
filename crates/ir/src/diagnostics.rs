@@ -1,11 +1,11 @@
 //! Source locations and diagnostics.
 //!
-//! Every op produced by [`crate::lower`] carries the location of the Nix
+//! Every op produced by [`crate::ast_to_hir`] carries the location of the Nix
 //! source it came from, so later stages can still report errors against the
 //! original source after the AST is gone. A location is encoded as
 //!
 //! ```text
-//! fused<nix.span 10..14>["file.nix": line: 1, column: 11]
+//! fused<nix_loc.span 10..14>["/abs/file.nix": line: 1, column: 11]
 //! ```
 //!
 //! i.e. a pliron [`Location::Fused`] whose metadata is a [`SpanAttr`] with the
@@ -16,6 +16,7 @@
 //! with the offending source snippet.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use pliron::combine::stream::position::SourcePosition;
@@ -28,7 +29,7 @@ use thiserror::Error;
 use crate::paths;
 
 /// Byte range `[start, end)` in the source file of a located op.
-#[pliron_attr(name = "nix.span", format = "$start `..` $end", verifier = "succ")]
+#[pliron_attr(name = "nix_loc.span", format = "$start `..` $end", verifier = "succ")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpanAttr {
     pub start: u32,
@@ -57,7 +58,8 @@ pub struct SourceFile {
     /// current directory, without resolving symlinks). Used for `__curPos`,
     /// for resolving relative path literals, and for IR locations.
     abs_path: String,
-    text: String,
+    /// The file's text, shared with the errors reported against it.
+    source: Arc<NamedSource<String>>,
     src: Source,
     /// Byte offset of the start of each line.
     line_starts: Vec<usize>,
@@ -97,10 +99,11 @@ impl SourceFile {
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
         let src = Source::new_from_file(ctx, abs_path.clone());
+        let source = Arc::new(NamedSource::new(path.display().to_string(), text));
         Ok(SourceFile {
             path,
             abs_path,
-            text,
+            source,
             src,
             line_starts,
         })
@@ -122,14 +125,14 @@ impl SourceFile {
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        self.source.inner()
     }
 
     /// 1-based line and (character) column of a byte offset.
     pub fn line_col(&self, offset: TextSize) -> (usize, usize) {
         let offset = usize::from(offset);
         let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
-        let col = self.text[self.line_starts[line]..offset].chars().count();
+        let col = self.text()[self.line_starts[line]..offset].chars().count();
         (line + 1, col + 1)
     }
 
@@ -153,18 +156,14 @@ impl SourceFile {
 
     /// The range covering the whole file.
     pub fn full_range(&self) -> TextRange {
-        TextRange::up_to(TextSize::of(self.text.as_str()))
-    }
-
-    fn named_source(&self) -> NamedSource<String> {
-        NamedSource::new(self.path.display().to_string(), self.text.clone())
+        TextRange::up_to(TextSize::of(self.text()))
     }
 
     /// Attaches this file's source to a diagnostic.
     pub(crate) fn error(&self, diag: Diag) -> SourceError {
         SourceError {
             kind: diag.kind,
-            src: self.named_source(),
+            src: Arc::clone(&self.source),
             span: diag.span,
             secondary: diag.secondary,
         }
@@ -175,7 +174,7 @@ impl SourceFile {
         if errors.is_empty() {
             return Ok(());
         }
-        let eof = TextRange::empty(TextSize::of(self.text.as_str()));
+        let eof = TextRange::empty(TextSize::of(self.text()));
         let is_eof = |err: &ParseError| {
             matches!(
                 err,
@@ -198,9 +197,10 @@ impl SourceFile {
             .map(|err| {
                 let (msg, span) = match err {
                     ParseError::Unexpected(r) => ("unexpected token".to_string(), Some(*r)),
-                    ParseError::UnexpectedExtra(r) => {
-                        ("unexpected token after the end of the expression".to_string(), Some(*r))
-                    }
+                    ParseError::UnexpectedExtra(r) => (
+                        "unexpected token after the end of the expression".to_string(),
+                        Some(*r),
+                    ),
                     ParseError::UnexpectedWanted(found, r, wanted) => (
                         format!(
                             "unexpected {}, expected {}",
@@ -217,9 +217,10 @@ impl SourceFile {
                         format!("unexpected end of file, expected {}", one_of(wanted)),
                         Some(eof),
                     ),
-                    ParseError::DuplicatedArgs(r, name) => {
-                        (format!("duplicate formal function argument '{name}'"), Some(*r))
-                    }
+                    ParseError::DuplicatedArgs(r, name) => (
+                        format!("duplicate formal function argument '{name}'"),
+                        Some(*r),
+                    ),
                     ParseError::RecursionLimitExceeded => {
                         ("expression is nested too deeply".to_string(), None)
                     }
@@ -257,7 +258,11 @@ fn one_of(kinds: &[SyntaxKind]) -> String {
         [one] => kind_name(*one),
         _ => format!(
             "one of: {}",
-            kinds.iter().map(|k| kind_name(*k)).collect::<Vec<_>>().join(", ")
+            kinds
+                .iter()
+                .map(|k| kind_name(*k))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -275,6 +280,10 @@ pub enum ErrorKind {
     DuplicateAttr(String),
     #[error("duplicate formal function argument '{0}'")]
     DuplicateFormal(String),
+    #[error("invalid integer '{0}'")]
+    InvalidInteger(String),
+    #[error("invalid float '{0}'")]
+    InvalidFloat(String),
     #[error("undefined variable '{0}'")]
     UndefinedVariable(String),
     #[error("dynamic attributes not allowed in {0}")]
@@ -293,6 +302,8 @@ impl ErrorKind {
             ErrorKind::Missing(_) => "nix::missing",
             ErrorKind::DuplicateAttr(_) => "nix::duplicate_attr",
             ErrorKind::DuplicateFormal(_) => "nix::duplicate_formal",
+            ErrorKind::InvalidInteger(_) => "nix::invalid_integer",
+            ErrorKind::InvalidFloat(_) => "nix::invalid_float",
             ErrorKind::UndefinedVariable(_) => "nix::undefined_variable",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
             ErrorKind::NoHomeDir(_) => "nix::no_home_dir",
@@ -302,9 +313,10 @@ impl ErrorKind {
 
     fn help(&self) -> Option<&'static str> {
         match self {
-            ErrorKind::DuplicateAttr(_) => {
-                Some("attribute paths like `a.b = ...; a.c = ...;` are merged, but plain values cannot be")
-            }
+            ErrorKind::DuplicateAttr(_) => Some(
+                "attribute paths like `a.b = ...; a.c = ...;` are merged, \
+                 but plain values cannot be",
+            ),
             ErrorKind::DynamicAttrNotAllowed(_) => Some("use a static name here"),
             ErrorKind::Verify(_) => Some("this is a bug in the AST lowering"),
             _ => None,
@@ -348,7 +360,7 @@ impl Diag {
 #[error("{kind}")]
 pub struct SourceError {
     pub kind: ErrorKind,
-    src: NamedSource<String>,
+    src: Arc<NamedSource<String>>,
     span: Option<SourceSpan>,
     secondary: Vec<(SourceSpan, String)>,
 }

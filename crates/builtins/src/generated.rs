@@ -3,6 +3,7 @@
 use crate::registry::{Global, Kind};
 
 /// `(name, global binding, kind, in pure eval)` for every attribute of `builtins`.
+#[rustfmt::skip]
 pub(crate) const ENTRIES: &[(&str, Global, Kind, bool)] = &[
     ("abort", Global::Bare, Kind::PrimOp, true),
     ("add", Global::Prefixed, Kind::PrimOp, true),

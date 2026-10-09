@@ -1,37 +1,41 @@
-use std::{fs, path::{Path, PathBuf}};
+//! The `aetheryx` command line driver.
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use dialect::diagnostics::SourceFile;
+use ir::ast_to_hir::lower_root;
+use ir::diagnostics::SourceFile;
 use miette::{IntoDiagnostic, Result, WrapErr};
-use pliron::{context::Context, location::erase_locations, op::Op, printable::Printable};
-use rnix::{ast::Root, NodeOrToken, Parse, SyntaxNode, SyntaxToken};
+use pliron::context::Context;
+use pliron::location::erase_locations;
+use pliron::op::Op;
+use pliron::printable::Printable;
+use rnix::{NodeOrToken, Parse, Root, SyntaxNode, SyntaxToken};
 
 #[derive(Parser)]
-#[command(name = "aetheryx")]
-#[command(about = "Pure Nix evualuation engine", long_about = None)]
+#[command(name = "aetheryx", about = "A Nix evaluation engine", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commmand,
+    command: Command,
 }
 
 #[derive(Subcommand)]
-enum Commmand {
-    /// Evaluate a Nix file (placeholder: lowers it to the Nix dialect).
+enum Command {
+    /// Evaluate a Nix file (not implemented yet: only lowers it to `nix_hir`).
     Eval {
         file: PathBuf,
-        /// Print the Nix dialect IR before evaluating.
+        /// Print the `nix_hir` IR.
         #[arg(long)]
-        dump_ir: bool,
+        dump_hir: bool,
         /// Don't print source locations in the IR.
         #[arg(long)]
         no_locations: bool,
     },
-    /// Parse and dump the rnix AST for a Nix file.
-    Ast {
-        file: PathBuf,
-    },
-    /// Lower Nix files to the Nix dialect and print the IR.
-    Ir {
+    /// Print the rnix syntax tree of a Nix file.
+    Ast { file: PathBuf },
+    /// Lower Nix files to `nix_hir` and print the IR.
+    Hir {
         #[arg(required = true)]
         files: Vec<PathBuf>,
         /// Don't print source locations in the IR.
@@ -41,23 +45,26 @@ enum Commmand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    use Commmand::*;
-
-    match cli.command {
-        Eval { file, dump_ir, no_locations } => {
-            let ctx = &mut Context::new();
-            let ir = lower_file(ctx, &file, no_locations)?;
-            if dump_ir {
-                println!("{ir}");
+    match Cli::parse().command {
+        Command::Eval {
+            file,
+            dump_hir,
+            no_locations,
+        } => {
+            let hir = lower_file(&mut Context::new(), &file, no_locations)?;
+            if dump_hir {
+                println!("{hir}");
             }
             eprintln!("note: evaluation is not implemented yet");
         }
-        Ast { file } => {
+        Command::Ast { file } => {
             let (_, parse) = parse_file(&Context::new(), &file)?;
             print_node(&parse.syntax(), 0);
         }
-        Ir { files, no_locations } => {
+        Command::Hir {
+            files,
+            no_locations,
+        } => {
             let ctx = &mut Context::new();
             for file in &files {
                 println!("{}", lower_file(ctx, file, no_locations)?);
@@ -80,37 +87,41 @@ fn parse_file(ctx: &Context, file: &Path) -> Result<(SourceFile, Parse<Root>)> {
     Ok((source, parse))
 }
 
-/// Parses `file`, lowers it to the Nix dialect and returns the printed IR.
+/// Parses `file`, lowers it to `nix_hir` and returns the printed IR.
 fn lower_file(ctx: &mut Context, file: &Path, no_locations: bool) -> Result<String> {
     let (source, parse) = parse_file(ctx, file)?;
-    let module = dialect::lower::lower_root(ctx, &source, &parse.tree())?;
+    let module = lower_root(ctx, &source, &parse.tree())?;
     if no_locations {
         erase_locations(ctx, module.get_operation());
     }
     Ok(module.get_operation().disp(ctx).to_string())
 }
 
-fn print_node(node: &SyntaxNode, indent: usize) {
-    println!("{:indent$}{:?}", "", node.kind(), indent = indent * 2);
+fn print_node(node: &SyntaxNode, depth: usize) {
+    println!("{:indent$}{:?}", "", node.kind(), indent = depth * 2);
     for child in node.children_with_tokens() {
         match child {
-            NodeOrToken::Node(n) => print_node(&n, indent + 1),
-            NodeOrToken::Token(t) => print_token(&t, indent + 1),
+            NodeOrToken::Node(n) => print_node(&n, depth + 1),
+            NodeOrToken::Token(t) => print_token(&t, depth + 1),
         }
     }
 }
 
-fn print_token(tok: &SyntaxToken, indent: usize) {
-    let mut text = tok.text().to_string().replace('\n', "\\n").replace('\t', "\\t");
-    if text.len() > 40 {
-        text.truncate(37);
-        text.push_str("...");
-    }
+fn print_token(token: &SyntaxToken, depth: usize) {
+    const MAX_CHARS: usize = 40;
+    let escaped = token.text().replace('\n', "\\n").replace('\t', "\\t");
+    // Truncate by characters: a byte index could split a UTF-8 character.
+    let text = if escaped.chars().count() > MAX_CHARS {
+        let prefix: String = escaped.chars().take(MAX_CHARS - 3).collect();
+        format!("{prefix}...")
+    } else {
+        escaped
+    };
     println!(
         "{:indent$}{:?} {:?}",
         "",
-        tok.kind(),
+        token.kind(),
         text,
-        indent = indent * 2
+        indent = depth * 2
     );
 }

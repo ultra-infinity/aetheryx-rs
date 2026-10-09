@@ -23,6 +23,7 @@ echo
 echo "use crate::registry::{Global, Kind};"
 echo
 echo "/// \`(name, global binding, kind, in pure eval)\` for every attribute of \`builtins\`."
+echo "#[rustfmt::skip]"
 echo "pub(crate) const ENTRIES: &[(&str, Global, Kind, bool)] = &["
 for n in $names; do
   if [ "$(eval_nix "with { \"$n\" = \"SENTINEL\"; }; $n" | head -c 12)" = '"SENTINEL"' ]; then

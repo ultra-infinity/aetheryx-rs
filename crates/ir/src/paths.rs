@@ -13,7 +13,7 @@
 //!
 //! For interpolated paths (`./a/${x}`) only the leading literal is resolved
 //! here, keeping a trailing `/`. The concatenated result is normalized at
-//! evaluation time, which is the evaluator's job (`nix.interpolate Path`).
+//! evaluation time, which is the evaluator's job (`nix_hir.interpolate Path`).
 
 /// Textually normalizes an absolute path, like Nix's `canonPath`.
 pub fn canon_path(path: &str) -> String {
@@ -53,7 +53,12 @@ pub fn dir_of(path: &str) -> &str {
 /// interpolated path) the way the Nix parser does.
 ///
 /// Returns `None` for a `~/` path when the home directory is unknown.
-pub fn resolve_literal(text: &str, base: &str, home: Option<&str>, interpolated: bool) -> Option<String> {
+pub fn resolve_literal(
+    text: &str,
+    base: &str,
+    home: Option<&str>,
+    interpolated: bool,
+) -> Option<String> {
     if let Some(rest) = text.strip_prefix('~') {
         return home.map(|home| format!("{home}{rest}"));
     }

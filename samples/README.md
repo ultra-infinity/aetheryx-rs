@@ -11,12 +11,12 @@ Test inputs for the driver. Every file has been checked against Nix 2.28.3.
 ## Running
 
 ```sh
-# Lower to the Nix dialect and print the IR
-cargo run -p driver -- ir samples/valid/09-scoping.nix
-cargo run -p driver -- ir --no-locations samples/valid/*.nix
+# Lower to nix_hir and print the IR
+cargo run -p driver -- hir samples/valid/09-scoping.nix
+cargo run -p driver -- hir --no-locations samples/valid/*.nix
 
 # Show a diagnostic
-cargo run -p driver -- ir samples/invalid/duplicate-attr.nix
+cargo run -p driver -- hir samples/invalid/duplicate-attr.nix
 
 # Reference result from real Nix
 nix-instantiate --eval --strict samples/valid/09-scoping.nix

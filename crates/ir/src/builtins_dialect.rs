@@ -3,7 +3,8 @@
 //! Builtins are first-class values in Nix (`map` can be passed around and
 //! partially applied, and `builtins` is an attribute set), so they are
 //! represented as values: `nix_builtins.ref "map"` produces the builtin
-//! `builtins.map`. Which builtins exist comes from the [`builtins`] registry.
+//! `builtins.map`, as a `nix_hir.value`. Which builtins exist comes from the
+//! [`builtins`] registry.
 //!
 //! The dialect is named `nix_builtins` rather than `builtins` to avoid
 //! confusion with pliron's own `builtin` dialect (`builtin.module`, ...).
@@ -17,12 +18,12 @@ use pliron::op::Op;
 use pliron::result::Result;
 use pliron::verify_err;
 
-use crate::new_operation;
+use crate::hir::new_operation;
 
 #[pliron_op(
     name = "nix_builtins.ref",
     // The builtin `builtins.<name>`, as a value.
-    format = "attr($builtin_name, $StringAttr)",
+    format = "attr($builtin_name, $StringAttr) ` : ` type($0)",
     interfaces = [
         NOpdsInterface<0>,
         NResultsInterface<1>,
@@ -51,7 +52,10 @@ impl RefOp {
 
 impl Verify for RefOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let Some(name) = self.get_attr_builtin_name(ctx).map(|n| n.as_str().to_string()) else {
+        let Some(name) = self
+            .get_attr_builtin_name(ctx)
+            .map(|n| n.as_str().to_string())
+        else {
             return verify_err!(self.loc(ctx), "nix_builtins.ref has no builtin_name");
         };
         if builtins::get(&name).is_none() {

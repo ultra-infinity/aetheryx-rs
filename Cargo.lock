@@ -292,18 +292,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
-name = "dialect"
-version = "0.1.0"
-dependencies = [
- "builtins",
- "miette",
- "pliron",
- "rnix",
- "rowan",
- "thiserror",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -325,7 +313,7 @@ name = "driver"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dialect",
+ "ir",
  "miette",
  "pliron",
  "rnix",
@@ -501,6 +489,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "ir"
+version = "0.1.0"
+dependencies = [
+ "builtins",
+ "miette",
+ "pliron",
+ "rnix",
+ "rowan",
+ "thiserror",
 ]
 
 [[package]]

@@ -22,6 +22,7 @@ use pliron::value::Value;
 
 pub mod diagnostics;
 pub mod lower;
+pub mod paths;
 
 // Dialect handle (no trait impl here; consumers may implement pliron::Dialect)
 #[derive(Debug, Clone, Default)]

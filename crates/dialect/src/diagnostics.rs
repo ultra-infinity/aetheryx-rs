@@ -25,6 +25,8 @@ use pliron::location::{Location, Source};
 use rnix::{ParseError, SyntaxKind, TextRange, TextSize};
 use thiserror::Error;
 
+use crate::paths;
+
 /// Byte range `[start, end)` in the source file of a located op.
 #[pliron_attr(name = "nix.span", format = "$start `..` $end", verifier = "succ")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,7 +51,12 @@ pub fn span_of(loc: &Location) -> Option<SourceSpan> {
 
 /// A Nix source file being compiled.
 pub struct SourceFile {
+    /// The path as given, used when displaying diagnostics.
     path: PathBuf,
+    /// The path made absolute and normalized the way Nix does it (against the
+    /// current directory, without resolving symlinks). Used for `__curPos`,
+    /// for resolving relative path literals, and for IR locations.
+    abs_path: String,
     text: String,
     src: Source,
     /// Byte offset of the start of each line.
@@ -57,23 +64,61 @@ pub struct SourceFile {
 }
 
 impl SourceFile {
-    pub fn new(ctx: &Context, path: impl Into<PathBuf>, text: impl Into<String>) -> Self {
+    /// A file at `path`, made absolute against the current directory.
+    pub fn new(
+        ctx: &Context,
+        path: impl Into<PathBuf>,
+        text: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        Self::with_cwd(ctx, path, text, &std::env::current_dir()?)
+    }
+
+    /// A file at `path`, made absolute against `cwd`.
+    ///
+    /// Fails if either path is not valid UTF-8.
+    pub fn with_cwd(
+        ctx: &Context,
+        path: impl Into<PathBuf>,
+        text: impl Into<String>,
+        cwd: &Path,
+    ) -> std::io::Result<Self> {
         let path = path.into();
         let text = text.into();
+        let utf8 = |p: &Path| {
+            p.to_str().map(str::to_owned).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("path is not valid UTF-8: {}", p.display()),
+                )
+            })
+        };
+        let abs_path = paths::abs_path(&utf8(&path)?, &utf8(cwd)?);
         let line_starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
-        let src = Source::new_from_file(ctx, path.clone());
-        SourceFile {
+        let src = Source::new_from_file(ctx, abs_path.clone());
+        Ok(SourceFile {
             path,
+            abs_path,
             text,
             src,
             line_starts,
-        }
+        })
     }
 
+    /// The path as given.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The normalized absolute path, as Nix reports it in `__curPos.file`.
+    pub fn abs_path(&self) -> &str {
+        &self.abs_path
+    }
+
+    /// The directory that relative path literals are resolved against.
+    pub fn base_dir(&self) -> &str {
+        paths::dir_of(&self.abs_path)
     }
 
     pub fn text(&self) -> &str {
@@ -232,6 +277,8 @@ pub enum ErrorKind {
     DuplicateFormal(String),
     #[error("dynamic attributes not allowed in {0}")]
     DynamicAttrNotAllowed(&'static str),
+    #[error("cannot resolve '{0}': the home directory is unknown")]
+    NoHomeDir(String),
     #[error("IR verification failed: {0}")]
     Verify(String),
 }
@@ -245,6 +292,7 @@ impl ErrorKind {
             ErrorKind::DuplicateAttr(_) => "nix::duplicate_attr",
             ErrorKind::DuplicateFormal(_) => "nix::duplicate_formal",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
+            ErrorKind::NoHomeDir(_) => "nix::no_home_dir",
             ErrorKind::Verify(_) => "nix::ir::verify",
         }
     }

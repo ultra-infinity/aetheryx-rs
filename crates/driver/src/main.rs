@@ -73,7 +73,9 @@ fn parse_file(ctx: &Context, file: &Path) -> Result<(SourceFile, Parse<Root>)> {
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", file.display()))?;
     let parse = Root::parse(&text);
-    let source = SourceFile::new(ctx, file, text);
+    let source = SourceFile::new(ctx, file, text)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to resolve {}", file.display()))?;
     source.check_parse(parse.errors())?;
     Ok((source, parse))
 }

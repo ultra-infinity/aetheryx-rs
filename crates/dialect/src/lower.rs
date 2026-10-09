@@ -6,8 +6,11 @@
 //!
 //! # Name resolution
 //! Names are resolved at lowering time where Nix semantics allow it:
-//! - Lambda parameters and pattern formals are SSA values (block arguments or
-//!   values derived from them) and are referenced directly.
+//! - Lambda parameters and pattern formals without a default are SSA values
+//!   (block arguments or values derived from them) and are referenced directly.
+//! - Formals with a default (`{ a ? b, b ? 1 }:`) form a recursive scope: any
+//!   default may refer to any formal. They are bound in a `nix.let_in` that
+//!   wraps the lambda body, and referenced with `nix.var` like `let` names.
 //! - Names bound by `let` and `rec { }` are recursive, so they cannot be plain
 //!   SSA values. References to them lower to `nix.var "name"`, which resolves
 //!   to the innermost enclosing `nix.let_in` / `nix.rec_attr_set` binding it.
@@ -23,6 +26,11 @@
 //! - `a |> f` and `f <| a` become `nix.apply`.
 //! - `<p>` becomes `__findFile __nixPath "p"`.
 //! - `let { ...; body = e; }` becomes `(rec { ...; body = e; }).body`.
+//!
+//! # Paths
+//! Path literals are resolved as the Nix parser does it (see [`crate::paths`]):
+//! relative paths against the file's directory, `~/` against the home
+//! directory. For interpolated paths only the leading literal is resolved.
 //!
 //! # Locations
 //! Every op is located at the source range of the syntax it was lowered from
@@ -54,13 +62,40 @@ use crate::{
 
 type Result<T> = std::result::Result<T, Diag>;
 
-/// Lowers a parsed Nix file into a verified module containing `@main`.
+/// Inputs to lowering that come from the environment rather than the source.
+#[derive(Clone, Debug, Default)]
+pub struct LowerOptions {
+    /// The directory `~/` path literals resolve against.
+    pub home_dir: Option<String>,
+}
+
+impl LowerOptions {
+    /// Reads the options from the process environment, as Nix does.
+    pub fn from_env() -> Self {
+        LowerOptions {
+            home_dir: std::env::home_dir().and_then(|p| p.to_str().map(str::to_owned)),
+        }
+    }
+}
+
+/// Lowers a parsed Nix file into a verified module containing `@main`, using
+/// [`LowerOptions::from_env`].
 ///
 /// `root` must have been parsed from `file`'s text.
 pub fn lower_root(
     ctx: &mut Context,
     file: &SourceFile,
     root: &ast::Root,
+) -> std::result::Result<ModuleOp, SourceError> {
+    lower_root_with(ctx, file, root, &LowerOptions::from_env())
+}
+
+/// Like [`lower_root`], with explicit [`LowerOptions`].
+pub fn lower_root_with(
+    ctx: &mut Context,
+    file: &SourceFile,
+    root: &ast::Root,
+    options: &LowerOptions,
 ) -> std::result::Result<ModuleOp, SourceError> {
     let module_name = file
         .path()
@@ -80,6 +115,7 @@ pub fn lower_root(
     let mut lowerer = Lowerer {
         ctx,
         file,
+        options,
         cur: root.syntax().text_range(),
         scopes: Vec::new(),
     };
@@ -345,6 +381,7 @@ fn sanitize_identifier(name: &str) -> String {
 struct Lowerer<'a> {
     ctx: &'a mut Context,
     file: &'a SourceFile,
+    options: &'a LowerOptions,
     /// Source range that newly emitted ops are located at.
     cur: TextRange,
     /// Innermost scope last.
@@ -585,7 +622,7 @@ impl Lowerer<'_> {
             Expr::BinOp(bin) => self.lower_binop(block, bin),
             Expr::CurPos(pos) => {
                 let (line, col) = self.file.line_col(pos.syntax().text_range().start());
-                let file = self.file.path().display().to_string();
+                let file = self.file.abs_path().to_string();
                 let set = AttrSetOp::new(self.ctx);
                 self.append(block, &set);
                 let inner = add_region_block(self.ctx, set.get_operation(), 0);
@@ -676,12 +713,29 @@ impl Lowerer<'_> {
         }
 
         let parts = path.parts();
+        let interpolated = parts.len() > 1;
+        let resolve = |this: &Self, text: &str| {
+            crate::paths::resolve_literal(
+                text,
+                this.file.base_dir(),
+                this.options.home_dir.as_deref(),
+                interpolated,
+            )
+            .ok_or_else(|| Diag::new(ErrorKind::NoHomeDir(text.to_string()), this.cur))
+        };
         if let [InterpolPart::Literal(lit)] = parts.as_slice() {
-            return Ok(self.emit_const(block, LiteralKind::Path(lit.text().to_string())));
+            let resolved = resolve(self, lit.text())?;
+            return Ok(self.emit_const(block, LiteralKind::Path(resolved)));
         }
+        // Like Nix, resolve only the leading literal (as a path value); the
+        // other pieces are raw strings.
         let mut values = Vec::new();
-        for part in &parts {
+        for (i, part) in parts.iter().enumerate() {
             values.push(match part {
+                InterpolPart::Literal(lit) if i == 0 => {
+                    let resolved = resolve(self, lit.text())?;
+                    self.emit_const(block, LiteralKind::Path(resolved))
+                }
                 InterpolPart::Literal(lit) => self.emit_str(block, lit.text()),
                 InterpolPart::Interpolation(i) => {
                     let e = self.child(i.expr(), i.syntax(), "interpolated expression")?;
@@ -873,25 +927,44 @@ impl Lowerer<'_> {
         let body_block = add_region_block_with_args(self.ctx, op.get_operation(), 0, 1);
         let arg = body_block.deref(self.ctx).get_argument(0);
 
+        let depth = self.scopes.len();
         self.scopes.push(HashMap::new());
         let res = self
             .at(param.syntax().text_range(), |this| this.bind_param(body_block, arg, &param))
-            .and_then(|()| self.lower_expr(body_block, &body));
-        self.scopes.pop();
+            .and_then(|defaults| match defaults {
+                None => self.lower_expr(body_block, &body),
+                // The body goes inside the `nix.let_in` binding the defaulted formals.
+                Some((let_op, let_body)) => {
+                    let v = self.lower_expr(let_body, &body)?;
+                    self.emit_yield(let_body, v);
+                    Ok(result_of(self.ctx, &let_op))
+                }
+            });
+        // `bind_param` may have pushed a scope for the defaulted formals.
+        self.scopes.truncate(depth);
         let v = res?;
         self.emit_yield(body_block, v);
         Ok(result_of(self.ctx, &op))
     }
 
-    /// Brings the lambda parameter(s) into the innermost scope.
-    fn bind_param(&mut self, block: Ptr<BasicBlock>, arg: Value, param: &ast::Param) -> Result<()> {
+    /// Brings the lambda parameter(s) into scope.
+    ///
+    /// If there are formals with defaults, they are bound in a new `nix.let_in`
+    /// appended to `block`, whose scope is pushed. Returns that op and the
+    /// block the lambda body must be lowered into.
+    fn bind_param(
+        &mut self,
+        block: Ptr<BasicBlock>,
+        arg: Value,
+        param: &ast::Param,
+    ) -> Result<Option<(LetInOp, Ptr<BasicBlock>)>> {
         let pattern = match param {
             ast::Param::IdentParam(p) => {
                 let id = self.child(p.ident(), p.syntax(), "parameter name")?;
                 let name = ident_name(&id);
                 self.name_value(arg, &name);
                 self.scopes.last_mut().unwrap().insert(name, Binding::Ssa(arg));
-                return Ok(());
+                return Ok(None);
             }
             ast::Param::Pattern(p) => p,
         };
@@ -929,7 +1002,6 @@ impl Lowerer<'_> {
         let checked = FormalsOp::new(self.ctx, arg, &names, pattern.ellipsis_token().is_some());
         let checked = self.emit(block, checked);
 
-        // Formals without defaults first, so that defaults can refer to them.
         let (plain, defaulted): (Vec<_>, Vec<_>) =
             formals.into_iter().partition(|(_, d, _)| d.is_none());
         for (name, _, range) in plain {
@@ -940,25 +1012,45 @@ impl Lowerer<'_> {
             });
             self.scopes.last_mut().unwrap().insert(name, Binding::Ssa(v));
         }
+        if defaulted.is_empty() {
+            return Ok(None);
+        }
+
+        // In Nix, every default can refer to every formal (even later ones, or
+        // itself), so the defaulted formals are bound recursively:
+        //   { a ? b, b ? 1 }: body  ==>  let a = arg.a or b; b = arg.b or 1; in body
+        // where `arg.x or d` is spelled with `nix.has_attr` / `nix.if`.
+        let let_op = LetInOp::new(self.ctx);
+        self.append(block, &let_op);
+        let bindings = add_region_block(self.ctx, let_op.get_operation(), 0);
+        let let_body = add_region_block(self.ctx, let_op.get_operation(), 1);
+        self.scopes.push(
+            defaulted
+                .iter()
+                .map(|(name, _, _)| (name.clone(), Binding::Rec))
+                .collect(),
+        );
         for (name, default, range) in defaulted {
             let default = default.unwrap();
-            let v = self.at(range, |this| {
-                let key = this.emit_str(block, &name);
+            self.at(range, |this| -> Result<()> {
+                let key = this.emit_str(bindings, &name);
                 let has = HasAttrOp::new(this.ctx, checked, key);
-                let has = this.emit(block, has);
-                this.emit_if(
-                    block,
+                let has = this.emit(bindings, has);
+                let v = this.emit_if(
+                    bindings,
                     has,
                     |this, b| {
                         let op = SelectOp::new(this.ctx, checked, key);
                         Ok(this.emit(b, op))
                     },
                     |this, b| this.lower_expr(b, &default),
-                )
+                )?;
+                let bind = BindOp::new(this.ctx, &name, v);
+                this.append(bindings, &bind);
+                Ok(())
             })?;
-            self.scopes.last_mut().unwrap().insert(name, Binding::Ssa(v));
         }
-        Ok(())
+        Ok(Some((let_op, let_body)))
     }
 }
 
@@ -971,12 +1063,20 @@ mod tests {
     use super::*;
     use crate::diagnostics::span_of;
 
+    /// `sub/test.nix` relative to `/work`, so it resolves to `/work/sub/test.nix`.
+    fn test_file(ctx: &Context, src: &str) -> SourceFile {
+        SourceFile::with_cwd(ctx, "sub/test.nix", src, std::path::Path::new("/work")).unwrap()
+    }
+
     fn try_lower(src: &str) -> (Context, std::result::Result<ModuleOp, SourceError>) {
         let mut ctx = Context::new();
-        let file = SourceFile::new(&ctx, "test.nix", src);
+        let file = test_file(&ctx, src);
         let parse = ast::Root::parse(src);
         file.check_parse(parse.errors()).unwrap();
-        let res = lower_root(&mut ctx, &file, &parse.tree());
+        let options = LowerOptions {
+            home_dir: Some("/home/u".to_string()),
+        };
+        let res = lower_root_with(&mut ctx, &file, &parse.tree(), &options);
         (ctx, res)
     }
 
@@ -1021,7 +1121,7 @@ mod tests {
     fn locations_are_printed() {
         let ir = lower("{\n  a = 1;\n}");
         assert!(ir.contains("nix.span 4..10"), "{ir}");
-        assert!(ir.contains("\"test.nix\": line: 2, column: 3"), "{ir}");
+        assert!(ir.contains("\"/work/sub/test.nix\": line: 2, column: 3"), "{ir}");
     }
 
     #[test]
@@ -1120,6 +1220,85 @@ mod tests {
         }
     }
 
+    // Expected values are what `nix-instantiate --parse` (Nix 2.28) prints for
+    // the same literals in /work/sub, with HOME=/home/u.
+    #[test]
+    fn path_literals_are_resolved_like_nix() {
+        for (src, expected) in [
+            ("./a", "Path(\"/work/sub/a\")"),
+            ("./.", "Path(\"/work/sub\")"),
+            ("./..", "Path(\"/work\")"),
+            ("./a/../b", "Path(\"/work/sub/b\")"),
+            ("../../../x", "Path(\"/x\")"),
+            ("/etc/../etc/hosts", "Path(\"/etc/hosts\")"),
+            ("~/foo/../bar", "Path(\"/home/u/foo/../bar\")"),
+        ] {
+            let ir = lower(src);
+            assert!(ir.contains(expected), "{src}: expected {expected} in:\n{ir}");
+        }
+    }
+
+    #[test]
+    fn interpolated_paths_resolve_only_the_leading_literal() {
+        // nix-instantiate --parse -E 'x: ./a/${x}/c/../d' => (/work/sub/a/ + x + "/c/../d")
+        let ir = lower("x: ./a/${x}/c/../d");
+        assert!(ir.contains("Path(\"/work/sub/a/\")"), "{ir}");
+        assert!(ir.contains("String(\"/c/../d\")"), "{ir}");
+        // nix-instantiate --parse -E 'x: ./../../${x}' in /work/sub => (// + x)
+        assert!(lower("x: ./../../${x}").contains("Path(\"//\")"));
+        assert!(lower("x: ~/a/${x}").contains("Path(\"/home/u/a/\")"));
+    }
+
+    #[test]
+    fn cur_pos_file_is_absolute() {
+        let ir = lower("__curPos");
+        assert!(ir.contains("String(\"/work/sub/test.nix\")"), "{ir}");
+    }
+
+    #[test]
+    fn home_path_without_home_dir_is_an_error() {
+        let mut ctx = Context::new();
+        let src = "~/x";
+        let file = test_file(&ctx, src);
+        let parse = ast::Root::parse(src);
+        let res = lower_root_with(&mut ctx, &file, &parse.tree(), &LowerOptions::default());
+        let Err(err) = res else { panic!("expected an error") };
+        assert!(matches!(&err.kind, ErrorKind::NoHomeDir(p) if p == "~/x"));
+    }
+
+    #[test]
+    fn defaults_can_refer_to_later_formals() {
+        // Nix: ({ a ? b, b ? 1 }: a) {} == 1
+        let ir = lower("{ a ? b, b ? 1 }: a");
+        assert!(ir.contains("nix.let_in"), "{ir}");
+        assert!(ir.contains("nix.var \"b\""), "{ir}");
+        assert!(ir.contains("nix.var \"a\""), "{ir}");
+        assert!(!ir.contains("nix.lookup"), "{ir}");
+
+        // Nix: ({ a ? b + 1, b ? c * 10, c ? 1 }: a) {} == 11
+        let ir = lower("{ a ? b + 1, b ? c * 10, c ? 1 }: a");
+        assert!(ir.contains("nix.var \"c\""), "{ir}");
+        assert!(!ir.contains("nix.lookup"), "{ir}");
+    }
+
+    #[test]
+    fn formals_shadow_outer_names() {
+        // Nix: (x: { x ? 1, a ? x }: a) 7 {} == 1, so `x` is the formal.
+        let ir = lower("x: { x ? 1, a ? x }: a");
+        assert!(ir.contains("nix.var \"x\""), "{ir}");
+    }
+
+    #[test]
+    fn plain_formals_stay_ssa() {
+        let ir = lower("{ a, b }: a + b");
+        assert!(!ir.contains("nix.let_in"), "{ir}");
+        assert!(!ir.contains("nix.var"), "{ir}");
+        // A default referring to a plain formal uses the SSA value.
+        let ir = lower("{ a, b ? a }: b");
+        assert!(!ir.contains("nix.var \"a\""), "{ir}");
+        assert!(ir.contains("nix.var \"b\""), "{ir}");
+    }
+
     #[test]
     fn dynamic_let_binding_is_an_error() {
         let (_, res) = try_lower(r#"let ${"a" + "b"} = 1; in 2"#);
@@ -1132,7 +1311,7 @@ mod tests {
     fn parse_errors_are_located() {
         let ctx = Context::new();
         let src = "{ a = 1 }";
-        let file = SourceFile::new(&ctx, "test.nix", src);
+        let file = test_file(&ctx, src);
         let errs = file.check_parse(ast::Root::parse(src).errors()).unwrap_err();
         // Only the real error, not rnix's follow-up end-of-file errors.
         assert_eq!(errs.errors.len(), 1, "{errs:?}");

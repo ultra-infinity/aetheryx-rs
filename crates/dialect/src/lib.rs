@@ -20,6 +20,7 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::value::Value;
 
+pub mod builtins_dialect;
 pub mod diagnostics;
 pub mod lower;
 pub mod paths;
@@ -271,8 +272,9 @@ pub struct VarOp;
 
 #[pliron_op(
     name = "nix.lookup",
-    // Reference to a name not bound lexically: resolved through the enclosing
-    // `nix.with` scopes (innermost first), then the builtins.
+    // Reference to a name that is neither bound lexically nor a global builtin:
+    // resolved through the enclosing `nix.with` scopes, innermost first. Only
+    // emitted inside a `nix.with` (otherwise lowering reports an error).
     format = "attr($lookup_name, $StringAttr)",
     interfaces = [
         NOpdsInterface<0>,

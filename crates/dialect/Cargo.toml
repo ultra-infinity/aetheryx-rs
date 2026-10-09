@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 pliron = "0.19.0"
 rnix = "0.14.0"
+builtins = { path = "../builtins" }
 rowan = "0.16.1"
 miette = "7.6.0"
 thiserror = "2.0.21"

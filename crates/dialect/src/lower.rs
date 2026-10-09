@@ -14,9 +14,13 @@
 //! - Names bound by `let` and `rec { }` are recursive, so they cannot be plain
 //!   SSA values. References to them lower to `nix.var "name"`, which resolves
 //!   to the innermost enclosing `nix.let_in` / `nix.rec_attr_set` binding it.
-//! - Anything else lowers to `nix.lookup "name"`, which resolves through the
-//!   enclosing `nix.with` scopes and then the builtins. This mirrors Nix, where
-//!   `with` never shadows a lexical binding.
+//! - Global builtins (`map`, `__add`, `true`, ...; see the [`builtins`]
+//!   registry) lower to `nix_builtins.ref "name"` (`true`/`false`/`null` to
+//!   `nix.const`). They live in the outermost lexical scope, so they take
+//!   precedence over `with`: `with { map = 1; }; map` is the builtin.
+//! - Any other name lowers to `nix.lookup "name"`, which resolves through the
+//!   enclosing `nix.with` scopes at runtime. Outside every `with` such a name
+//!   is an "undefined variable" error, as in Nix.
 //!
 //! # Desugaring
 //! - Attribute paths in bindings (`a.b = 1; a.c = 2;`) are merged into nested
@@ -52,6 +56,7 @@ use rnix::TextRange;
 use rnix::ast::{self, HasEntry, InterpolPart};
 use rowan::ast::AstNode;
 
+use crate::builtins_dialect::RefOp;
 use crate::diagnostics::{Diag, ErrorKind, SourceError, SourceFile};
 use crate::{
     ApplyOp, AssertOp, AttrSetOp, BinOp, BinaryOp, BindOp, ConstOp, DynBindOp, FormalsOp,
@@ -116,6 +121,7 @@ pub fn lower_root_with(
         ctx,
         file,
         options,
+        with_depth: 0,
         cur: root.syntax().text_range(),
         scopes: Vec::new(),
     };
@@ -382,6 +388,8 @@ struct Lowerer<'a> {
     ctx: &'a mut Context,
     file: &'a SourceFile,
     options: &'a LowerOptions,
+    /// Number of `with` bodies enclosing the code being lowered.
+    with_depth: usize,
     /// Source range that newly emitted ops are located at.
     cur: TextRange,
     /// Innermost scope last.
@@ -455,29 +463,39 @@ impl Lowerer<'_> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
 
-    fn lower_ident(&mut self, block: Ptr<BasicBlock>, name: &str) -> Value {
+    /// Resolves an identifier in Nix's order: lexical scopes, then the global
+    /// builtins (which, being lexical too, take precedence over `with`), then
+    /// the enclosing `with` scopes. Without an enclosing `with`, an unbound
+    /// name is an error, as in Nix.
+    fn lower_ident(&mut self, block: Ptr<BasicBlock>, name: &str) -> Result<Value> {
         match self.resolve(name) {
-            Some(Binding::Ssa(v)) => v,
+            Some(Binding::Ssa(v)) => return Ok(v),
             Some(Binding::Rec) => {
                 let op = VarOp::new(self.ctx, name);
-                self.emit(block, op)
+                return Ok(self.emit(block, op));
             }
-            None => {
-                let lit = match name {
-                    "true" => Some(LiteralKind::Bool(true)),
-                    "false" => Some(LiteralKind::Bool(false)),
-                    "null" => Some(LiteralKind::Null),
-                    _ => None,
-                };
-                match lit {
-                    Some(lit) => self.emit_const(block, lit),
-                    None => {
-                        let op = LookupOp::new(self.ctx, name);
-                        self.emit(block, op)
-                    }
-                }
-            }
+            None => {}
         }
+        if let Some(builtin) = builtins::lookup_global(name) {
+            let lit = match builtin.name {
+                "true" => Some(LiteralKind::Bool(true)),
+                "false" => Some(LiteralKind::Bool(false)),
+                "null" => Some(LiteralKind::Null),
+                _ => None,
+            };
+            return Ok(match lit {
+                Some(lit) => self.emit_const(block, lit),
+                None => {
+                    let op = RefOp::new(self.ctx, builtin.name);
+                    self.emit(block, op)
+                }
+            });
+        }
+        if self.with_depth > 0 {
+            let op = LookupOp::new(self.ctx, name);
+            return Ok(self.emit(block, op));
+        }
+        Err(Diag::new(ErrorKind::UndefinedVariable(name.to_string()), self.cur))
     }
 
     /// Gives a block argument a readable name when the Nix name allows it.
@@ -511,7 +529,7 @@ impl Lowerer<'_> {
                 let path = self.child(ast::Path::cast(expr.syntax().clone()), expr.syntax(), "path")?;
                 self.lower_path(block, &path)
             }
-            Expr::Ident(id) => Ok(self.lower_ident(block, &ident_name(id))),
+            Expr::Ident(id) => self.lower_ident(block, &ident_name(id)),
             Expr::Paren(p) => {
                 let inner = self.child(p.expr(), p.syntax(), "parenthesized expression")?;
                 self.lower_expr(block, &inner)
@@ -579,8 +597,10 @@ impl Lowerer<'_> {
                 let op = WithOp::new(self.ctx, ns);
                 self.append(block, &op);
                 let body_block = add_region_block(self.ctx, op.get_operation(), 0);
-                let v = self.lower_expr(body_block, &body)?;
-                self.emit_yield(body_block, v);
+                self.with_depth += 1;
+                let v = self.lower_expr(body_block, &body);
+                self.with_depth -= 1;
+                self.emit_yield(body_block, v?);
                 Ok(result_of(self.ctx, &op))
             }
             Expr::Select(select) => {
@@ -703,8 +723,8 @@ impl Lowerer<'_> {
             // <p>  ==>  __findFile __nixPath "p"
             let content = self.child(search.content(), search.syntax(), "search path")?;
             let name = content.text().trim_start_matches('<').trim_end_matches('>');
-            let find_file = self.lower_ident(block, "__findFile");
-            let nix_path = self.lower_ident(block, "__nixPath");
+            let find_file = self.lower_ident(block, "__findFile")?;
+            let nix_path = self.lower_ident(block, "__nixPath")?;
             let name = self.emit_str(block, name);
             let partial = ApplyOp::new(self.ctx, find_file, nix_path);
             let partial = self.emit(block, partial);
@@ -810,7 +830,7 @@ impl Lowerer<'_> {
 
     /// Lowers a `rec { }` attribute set; its static names are in scope inside.
     fn lower_rec_attr_set(&mut self, block: Ptr<BasicBlock>, group: Group) -> Result<Value> {
-        let inherited = self.lower_plain_inherits(block, &group);
+        let inherited = self.lower_plain_inherits(block, &group)?;
         let set = RecAttrSetOp::new(self.ctx);
         self.append(block, &set);
         let inner = add_region_block(self.ctx, set.get_operation(), 0);
@@ -828,7 +848,7 @@ impl Lowerer<'_> {
         }
         let body = self.child(let_in.body(), let_in.syntax(), "let body")?;
 
-        let inherited = self.lower_plain_inherits(block, &group);
+        let inherited = self.lower_plain_inherits(block, &group)?;
         let op = LetInOp::new(self.ctx);
         self.append(block, &op);
         let bindings = add_region_block(self.ctx, op.get_operation(), 0);
@@ -856,15 +876,19 @@ impl Lowerer<'_> {
 
     /// `inherit x;` in a `let` / `rec { }` refers to `x` from the *enclosing*
     /// scope, so it is lowered before the recursive scope is entered.
-    fn lower_plain_inherits(&mut self, block: Ptr<BasicBlock>, group: &Group) -> HashMap<String, Value> {
+    fn lower_plain_inherits(
+        &mut self,
+        block: Ptr<BasicBlock>,
+        group: &Group,
+    ) -> Result<HashMap<String, Value>> {
         let mut inherited = HashMap::new();
         for entry in &group.entries {
             if let Node::Inherit(name) = &entry.node {
-                let v = self.at(entry.key.range(), |this| this.lower_ident(block, name));
+                let v = self.at(entry.key.range(), |this| this.lower_ident(block, name))?;
                 inherited.insert(name.clone(), v);
             }
         }
-        inherited
+        Ok(inherited)
     }
 
     /// Emits the `nix.bind` / `nix.dyn_bind` ops of `group` into `block`.
@@ -881,7 +905,7 @@ impl Lowerer<'_> {
                 Node::Group(g) => self.at(range, |this| this.lower_group(block, g))?,
                 Node::Inherit(name) => match inherited.get(&name) {
                     Some(&v) => v,
-                    None => self.at(key.range(), |this| this.lower_ident(block, &name)),
+                    None => self.at(key.range(), |this| this.lower_ident(block, &name))?,
                 },
                 Node::InheritFrom(idx, name) => {
                     let from = match froms.get(&idx) {
@@ -1148,9 +1172,65 @@ mod tests {
     #[test]
     fn with_names_are_lookups() {
         let ir = lower("with builtins; length [ 1 2 ]");
-        assert!(ir.contains("nix.lookup \"builtins\""), "{ir}");
+        // `builtins` is a global; `length` is not, so it comes from the `with`.
+        assert!(ir.contains("nix_builtins.ref \"builtins\""), "{ir}");
         assert!(ir.contains("nix.lookup \"length\""), "{ir}");
         assert!(ir.contains("nix.with"), "{ir}");
+    }
+
+    // Expected results are what Nix 2.28 does for the same expressions.
+    #[test]
+    fn global_builtins_take_precedence_over_with() {
+        // Nix: `with { map = 1; }; map` is <PRIMOP>.
+        let ir = lower("with { map = 1; }; map");
+        assert!(ir.contains("nix_builtins.ref \"map\""), "{ir}");
+        assert!(!ir.contains("nix.lookup"), "{ir}");
+        // Nix: `with { length = 1; }; length` is 1 (`length` is not global).
+        assert!(lower("with { length = 1; }; length").contains("nix.lookup \"length\""));
+        // Nix: `with { true = 1; }; true` is true.
+        assert!(lower("with { true = 1; }; true").contains("Bool(true)"));
+    }
+
+    #[test]
+    fn lexical_bindings_shadow_builtins() {
+        // Nix: `let map = 1; in map` is 1.
+        assert!(lower("let map = 1; in map").contains("nix.var \"map\""));
+        assert!(!lower("map: map").contains("nix_builtins"));
+    }
+
+    #[test]
+    fn prefixed_builtins_resolve_to_their_registry_name() {
+        assert!(lower("__add 1 2").contains("nix_builtins.ref \"add\""));
+        assert!(lower("<nixpkgs>").contains("nix_builtins.ref \"findFile\""));
+    }
+
+    fn undefined_variable(src: &str) -> String {
+        match try_lower(src).1 {
+            Err(SourceError { kind: ErrorKind::UndefinedVariable(name), .. }) => name,
+            Err(e) => panic!("{src}: unexpected error: {e}"),
+            Ok(_) => panic!("{src}: expected an undefined variable error"),
+        }
+    }
+
+    #[test]
+    fn unbound_names_outside_with_are_errors() {
+        // Nix: `nix-instantiate --parse -E 'add'` fails with undefined variable 'add'.
+        assert_eq!(undefined_variable("add 1 2"), "add");
+        assert_eq!(undefined_variable("__map"), "__map");
+        // A `with` only helps when it encloses the reference.
+        assert_eq!(undefined_variable("(with {}; 1) + x"), "x");
+        // `inherit x;` looks `x` up like a variable.
+        assert_eq!(undefined_variable("{ inherit x; }"), "x");
+        assert_eq!(undefined_variable("let inherit x; in x"), "x");
+        // ...but inside a `with` it is a dynamic lookup.
+        assert!(lower("x: with x; foo").contains("nix.lookup \"foo\""));
+    }
+
+    #[test]
+    fn undefined_variable_points_at_the_identifier() {
+        let (_, res) = try_lower("1 + nope");
+        let Err(err) = res else { panic!("expected an error") };
+        assert_eq!(err.span(), Some(SourceSpan::from(4..8)));
     }
 
     #[test]

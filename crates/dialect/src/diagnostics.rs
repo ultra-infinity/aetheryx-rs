@@ -275,6 +275,8 @@ pub enum ErrorKind {
     DuplicateAttr(String),
     #[error("duplicate formal function argument '{0}'")]
     DuplicateFormal(String),
+    #[error("undefined variable '{0}'")]
+    UndefinedVariable(String),
     #[error("dynamic attributes not allowed in {0}")]
     DynamicAttrNotAllowed(&'static str),
     #[error("cannot resolve '{0}': the home directory is unknown")]
@@ -291,6 +293,7 @@ impl ErrorKind {
             ErrorKind::Missing(_) => "nix::missing",
             ErrorKind::DuplicateAttr(_) => "nix::duplicate_attr",
             ErrorKind::DuplicateFormal(_) => "nix::duplicate_formal",
+            ErrorKind::UndefinedVariable(_) => "nix::undefined_variable",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
             ErrorKind::NoHomeDir(_) => "nix::no_home_dir",
             ErrorKind::Verify(_) => "nix::ir::verify",

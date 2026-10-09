@@ -49,7 +49,9 @@ These files need extra arguments to evaluate with real Nix:
 | `13-search-path.nix` | `<name>` search paths |
 | `14-pipe-operators.nix` | experimental `\|>` and `<\|` |
 | `15-attrset-merging.nix` | attribute set merging, including `rec`-ness of merged sets |
+| `16-builtin-scoping.nix` | builtins are lexical globals that beat `with`; `__` prefixes; builtins as values |
 | `invalid/duplicate-attr*.nix` | duplicate attributes |
 | `invalid/duplicate-formal.nix` | duplicate formal arguments |
 | `invalid/dynamic-*.nix` | dynamic attributes where Nix forbids them |
+| `invalid/undefined-variable.nix` | unbound name outside any `with` |
 | `invalid/missing-semicolon.nix`, `unclosed-brace.nix`, `unexpected-token.nix` | parse errors |

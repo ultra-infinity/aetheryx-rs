@@ -4,6 +4,22 @@
 //! each op, so it is the oracle that compiled code will be checked against.
 //! Isolated regions become runtime thunks and closures holding the values of
 //! their captures; `if` regions run in place.
+//!
+//! # Differences from Nix
+//! Output and error messages match Nix 2.28 (`samples/expected` is checked
+//! byte for byte), except:
+//! - A failed `assert` reports `assertion failed`. Nix reprints the condition
+//!   (`assertion '(! true)' failed`) and, for `==`, explains the difference.
+//! - For "called with unexpected argument", Nix reports the first unexpected
+//!   argument in its internal symbol order; this reports the first by name.
+//! - A duplicate dynamic attribute is reported without the position of its
+//!   first definition.
+//! - Not supported yet, each failing with an explicit error: search paths
+//!   (`<name>`, `findFile`), `import`, derivations and the store, copying
+//!   paths to the store in string interpolation, string contexts, and the
+//!   builtins not implemented in `runtime::primops`.
+//! - `letrec` groups form reference cycles that are never freed: fine for a
+//!   single evaluation; the compiled runtime will need a garbage collector.
 
 use std::collections::HashMap;
 use std::rc::Rc;

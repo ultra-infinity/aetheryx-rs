@@ -173,7 +173,7 @@ impl SourceFile {
                         Some(eof),
                     ),
                     ParseError::DuplicatedArgs(r, name) => {
-                        (format!("duplicate formal argument '{name}'"), Some(*r))
+                        (format!("duplicate formal function argument '{name}'"), Some(*r))
                     }
                     ParseError::RecursionLimitExceeded => {
                         ("expression is nested too deeply".to_string(), None)
@@ -228,7 +228,9 @@ pub enum ErrorKind {
     Missing(&'static str),
     #[error("attribute '{0}' already defined")]
     DuplicateAttr(String),
-    #[error("dynamic attributes are not allowed in {0}")]
+    #[error("duplicate formal function argument '{0}'")]
+    DuplicateFormal(String),
+    #[error("dynamic attributes not allowed in {0}")]
     DynamicAttrNotAllowed(&'static str),
     #[error("IR verification failed: {0}")]
     Verify(String),
@@ -241,6 +243,7 @@ impl ErrorKind {
             ErrorKind::Syntax => "nix::syntax",
             ErrorKind::Missing(_) => "nix::missing",
             ErrorKind::DuplicateAttr(_) => "nix::duplicate_attr",
+            ErrorKind::DuplicateFormal(_) => "nix::duplicate_formal",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
             ErrorKind::Verify(_) => "nix::ir::verify",
         }

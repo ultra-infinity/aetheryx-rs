@@ -139,16 +139,37 @@ struct Entry {
 }
 
 /// The bindings of one attribute set / let, with attribute paths merged.
+///
+/// Merging follows Nix (verified against Nix 2.28):
+/// - `a.b = 1; a.c = 2;`, `a = { b = 1; }; a.c = 2;` and `a = { b = 1; };
+///   a = { c = 2; };` all merge into one set `a`, recursively.
+/// - The *first* definition decides whether the merged set is `rec`; every
+///   merged binding is evaluated in that scope, and `rec` on later literals
+///   is ignored. E.g. `{ a = rec { x = 1; }; a.y = x; }` gives `a.y == 1`.
+/// - Duplicates are reported with their full path from the set where the
+///   merge happens (`'a.b'`), or relative to the literal they occur in.
 #[derive(Default)]
 struct Group {
     entries: Vec<Entry>,
     /// Source expressions of `inherit (e) ...;` entries, evaluated once each.
     inherit_froms: Vec<ast::Expr>,
+    /// Whether this is a `rec { }` set.
+    rec: bool,
+    /// Attribute path of this group, used in duplicate-attribute errors.
+    path: Vec<String>,
 }
 
 impl Group {
-    fn from_entries<N: HasEntry>(node: &N) -> Result<Self> {
-        let mut group = Group::default();
+    fn new(rec: bool, path: Vec<String>) -> Self {
+        Group {
+            rec,
+            path,
+            ..Group::default()
+        }
+    }
+
+    fn from_entries<N: HasEntry>(node: &N, rec: bool, path: Vec<String>) -> Result<Self> {
+        let mut group = Group::new(rec, path);
         group.add_entries(node)?;
         Ok(group)
     }
@@ -189,18 +210,20 @@ impl Group {
         Ok(())
     }
 
+    /// The path of the attribute `key` of this group.
+    fn child_path(&self, key: &Key) -> Vec<String> {
+        let segment = match key {
+            Key::Static(name, _) => name.clone(),
+            Key::Dynamic(e, _) => format!("${{{}}}", e.syntax().text()),
+        };
+        self.path.iter().cloned().chain([segment]).collect()
+    }
+
     fn insert(&mut self, path: &[Key], node: Node, range: TextRange) -> Result<()> {
         let (first, rest) = path
             .split_first()
             .ok_or_else(|| Diag::new(ErrorKind::Missing("attribute path"), range))?;
-        let nested = |node: Node| -> Result<Node> {
-            if rest.is_empty() {
-                return Ok(node);
-            }
-            let mut group = Group::default();
-            group.insert(rest, node, range)?;
-            Ok(Node::Group(group))
-        };
+        let child_path = self.child_path(first);
 
         let existing = match first {
             // Dynamic keys are never merged.
@@ -211,33 +234,36 @@ impl Group {
                 .position(|e| matches!(&e.key, Key::Static(n, _) if n == name)),
         };
         let Some(idx) = existing else {
+            let node = if rest.is_empty() {
+                node
+            } else {
+                let mut group = Group::new(false, child_path);
+                group.insert(rest, node, range)?;
+                Node::Group(group)
+            };
             self.entries.push(Entry {
                 key: first.clone(),
-                node: nested(node)?,
+                node,
                 range,
             });
             return Ok(());
         };
 
-        // `a.b = 1; a = { c = 2; };` and friends: merge into one nested set.
-        let duplicate = || {
-            let Key::Static(name, _) = first else { unreachable!() };
-            Diag::new(ErrorKind::DuplicateAttr(name.clone()), first.range())
-                .with_label(self.entries[idx].key.range(), "first defined here")
-        };
-        let mergeable = match &node {
-            Node::Expr(ast::Expr::AttrSet(set)) => set.rec_token().is_none(),
-            _ => !rest.is_empty(),
-        };
-        if !mergeable || !self.entries[idx].node.is_mergeable() {
-            return Err(duplicate());
+        let new_is_set = matches!(node, Node::Expr(ast::Expr::AttrSet(_)));
+        if !(new_is_set || !rest.is_empty()) || !self.entries[idx].node.is_mergeable() {
+            return Err(Diag::new(ErrorKind::DuplicateAttr(child_path.join(".")), first.range())
+                .with_label(self.entries[idx].key.range(), "first defined here"));
         }
-        self.entries[idx].node.make_group()?;
+        self.entries[idx].node.make_group(child_path)?;
         let Node::Group(group) = &mut self.entries[idx].node else {
             unreachable!("mergeable nodes become groups");
         };
         match node {
-            Node::Expr(ast::Expr::AttrSet(set)) if rest.is_empty() => group.add_entries(&set),
+            Node::Expr(ast::Expr::AttrSet(set)) if rest.is_empty() => {
+                // Duplicates within the literal itself are reported relative to it.
+                Group::from_entries(&set, false, Vec::new())?;
+                group.add_entries(&set)
+            }
             node => group.insert(rest, node, range),
         }
     }
@@ -256,19 +282,17 @@ impl Group {
 
 impl Node {
     fn is_mergeable(&self) -> bool {
-        match self {
-            Node::Group(_) => true,
-            Node::Expr(ast::Expr::AttrSet(set)) => set.rec_token().is_none(),
-            _ => false,
-        }
+        matches!(self, Node::Group(_) | Node::Expr(ast::Expr::AttrSet(_)))
     }
 
-    /// Turns a non-recursive attribute set literal into a mergeable [`Group`].
-    fn make_group(&mut self) -> Result<()> {
+    /// Turns an attribute set literal at `path` into a mergeable [`Group`],
+    /// keeping its `rec`-ness.
+    fn make_group(&mut self, path: Vec<String>) -> Result<()> {
         if let Node::Expr(ast::Expr::AttrSet(set)) = self {
-            if set.rec_token().is_none() {
-                *self = Node::Group(Group::from_entries(set)?);
-            }
+            let rec = set.rec_token().is_some();
+            // Duplicates within the literal itself are reported relative to it.
+            Group::from_entries(set, rec, Vec::new())?;
+            *self = Node::Group(Group::from_entries(set, rec, path)?);
         }
         Ok(())
     }
@@ -468,16 +492,12 @@ impl Lowerer<'_> {
                 Ok(self.emit(block, op))
             }
             Expr::AttrSet(set) => {
-                let group = Group::from_entries(set)?;
-                if set.rec_token().is_some() {
-                    self.lower_rec_attr_set(block, group)
-                } else {
-                    self.lower_group(block, group)
-                }
+                let group = Group::from_entries(set, set.rec_token().is_some(), Vec::new())?;
+                self.lower_group(block, group)
             }
             Expr::LetIn(let_in) => self.lower_let_in(block, let_in),
             Expr::LegacyLet(legacy) => {
-                let group = Group::from_entries(legacy)?;
+                let group = Group::from_entries(legacy, true, Vec::new())?;
                 let set = self.lower_rec_attr_set(block, group)?;
                 let key = self.emit_str(block, "body");
                 let op = SelectOp::new(self.ctx, set, key);
@@ -722,8 +742,11 @@ impl Lowerer<'_> {
 
     // ─── Bindings ───────────────────────────────────────────────────────────
 
-    /// Lowers a non-recursive attribute set.
+    /// Lowers an attribute set, recursive or not.
     fn lower_group(&mut self, block: Ptr<BasicBlock>, group: Group) -> Result<Value> {
+        if group.rec {
+            return self.lower_rec_attr_set(block, group);
+        }
         let set = AttrSetOp::new(self.ctx);
         self.append(block, &set);
         let inner = add_region_block(self.ctx, set.get_operation(), 0);
@@ -745,7 +768,7 @@ impl Lowerer<'_> {
     }
 
     fn lower_let_in(&mut self, block: Ptr<BasicBlock>, let_in: &ast::LetIn) -> Result<Value> {
-        let group = Group::from_entries(let_in)?;
+        let group = Group::from_entries(let_in, false, Vec::new())?;
         if let Some(e) = group.entries.iter().find(|e| matches!(e.key, Key::Dynamic(..))) {
             return Err(Diag::new(ErrorKind::DynamicAttrNotAllowed("let"), e.key.range()));
         }
@@ -873,19 +896,34 @@ impl Lowerer<'_> {
             ast::Param::Pattern(p) => p,
         };
 
-        match pattern.pat_bind().and_then(|b| b.ident()) {
+        let bind = pattern.pat_bind().and_then(|b| b.ident());
+        let mut formals = Vec::new();
+        for entry in pattern.pat_entries() {
+            let id = self.child(entry.ident(), entry.syntax(), "formal name")?;
+            formals.push((ident_name(&id), entry.default(), entry.syntax().text_range()));
+        }
+
+        // rnix does not report these; Nix rejects `{ a, a }:` and `a@{ a }:`.
+        let mut seen: Vec<(String, TextRange)> = Vec::new();
+        let names_with_ranges = bind
+            .iter()
+            .map(|id| (ident_name(id), id.syntax().text_range()))
+            .chain(formals.iter().map(|(n, _, r)| (n.clone(), *r)));
+        for (name, range) in names_with_ranges {
+            if let Some((_, first)) = seen.iter().find(|(n, _)| *n == name) {
+                return Err(Diag::new(ErrorKind::DuplicateFormal(name), range)
+                    .with_label(*first, "first defined here"));
+            }
+            seen.push((name, range));
+        }
+
+        match bind {
             Some(id) => {
                 let name = ident_name(&id);
                 self.name_value(arg, &name);
                 self.scopes.last_mut().unwrap().insert(name, Binding::Ssa(arg));
             }
             None => self.name_value(arg, "arg"),
-        }
-
-        let mut formals = Vec::new();
-        for entry in pattern.pat_entries() {
-            let id = self.child(entry.ident(), entry.syntax(), "formal name")?;
-            formals.push((ident_name(&id), entry.default(), entry.syntax().text_range()));
         }
         let names: Vec<String> = formals.iter().map(|(n, _, _)| n.clone()).collect();
         let checked = FormalsOp::new(self.ctx, arg, &names, pattern.ellipsis_token().is_some());
@@ -1031,6 +1069,55 @@ mod tests {
         assert!(matches!(&err.kind, ErrorKind::DuplicateAttr(n) if n == "a"));
         let labels: Vec<SourceSpan> = err.labels().unwrap().map(|l| *l.inner()).collect();
         assert_eq!(labels, [SourceSpan::from(9..10), SourceSpan::from(2..3)]);
+    }
+
+    fn duplicate_name(src: &str) -> String {
+        match try_lower(src).1 {
+            Err(SourceError { kind: ErrorKind::DuplicateAttr(name), .. }) => name,
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected a duplicate attribute error for {src}"),
+        }
+    }
+
+    // Expected names are the ones Nix 2.28 reports for the same input.
+    #[test]
+    fn duplicate_attr_names_use_full_path() {
+        assert_eq!(duplicate_name("{ a.b = 1; a.c = 2; a.b = 3; }"), "a.b");
+        assert_eq!(duplicate_name("{ a = { b = 1; }; a = { b = 2; }; }"), "a.b");
+        assert_eq!(duplicate_name("{ a.b = { c = 1; }; a.b = { c = 2; }; }"), "a.b.c");
+        assert_eq!(duplicate_name("{ x = { a.b = 1; }; x.a = { b = 2; }; }"), "x.a.b");
+        assert_eq!(duplicate_name("{ a = 1; a.b = 2; }"), "a");
+        assert_eq!(duplicate_name("{ a = rec { x = 1; }; a.x = 2; }"), "a.x");
+        // A duplicate inside a single literal is reported relative to it.
+        assert_eq!(duplicate_name("{ x = { a = 1; a = 2; }; x.b = 3; }"), "a");
+    }
+
+    #[test]
+    fn merged_set_takes_rec_from_first_definition() {
+        // Nix: { a = { x = 1; y = 1; }; } -- `x` in `a.y` is the rec binding.
+        let ir = lower("let x = 9; in { a = rec { x = 1; }; a.y = x; }");
+        assert!(ir.contains("nix.rec_attr_set"), "{ir}");
+        assert!(ir.contains("nix.var \"x\""), "{ir}");
+
+        // Nix, applied to 9: { a = { x = 1; x2 = 2; z = 9; }; } -- the later
+        // `rec` is ignored, so `x2` in `z` is the lambda parameter.
+        let ir = lower("x2: { a = { x = 1; }; a = rec { x2 = 2; z = x2; }; }");
+        assert!(!ir.contains("nix.rec_attr_set"), "{ir}");
+        assert!(!ir.contains("nix.var"), "{ir}");
+    }
+
+    #[test]
+    fn duplicate_formals_are_errors() {
+        // All four are rejected by Nix 2.28 with "duplicate formal function argument 'a'".
+        for src in ["{ a, b, a }: a", "{ a, a ? 1 }: a", "a@{ a }: a", "{ a }@a: a"] {
+            match try_lower(src).1 {
+                Err(SourceError { kind: ErrorKind::DuplicateFormal(name), .. }) => {
+                    assert_eq!(name, "a", "{src}")
+                }
+                Err(e) => panic!("{src}: unexpected error: {e}"),
+                Ok(_) => panic!("{src}: expected a duplicate formal error"),
+            }
+        }
     }
 
     #[test]

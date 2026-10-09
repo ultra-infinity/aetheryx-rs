@@ -78,9 +78,10 @@ fn errors_match_nix() {
         err("9223372036854775807 + 1"),
         "integer overflow in adding 9223372036854775807 + 1"
     );
+    // Constant `${"a"}` keys are static, so this is a compile-time duplicate.
     assert_eq!(
         err(r#"{ ${"a"} = 1; ${"a"} = 2; }"#),
-        "attribute 'a' already defined"
+        "attribute 'a' already defined at /work/test.nix:1:3"
     );
 }
 
@@ -141,6 +142,39 @@ fn scoping() {
 }
 
 #[test]
+fn bindings_resolve_like_nix() {
+    for (src, expected) in [
+        ("let a = b; b = 1; in a", "1"),
+        ("let a = 1; b = a; c = b; in c", "1"),
+        ("let x = 1; in let x = 2; y = x; in y", "2"),
+        ("let x = 1; in let inherit x; y = x + 1; in y", "2"),
+        ("rec { a = 1; b = { c = a; }; }.b.c", "1"),
+        // Dynamic keys are evaluated in the recursive scope.
+        (r#"rec { k = "z"; ${k} = k; }"#, r#"{ k = "z"; z = "z"; }"#),
+        (
+            r#"let k = "o"; in rec { ${k} = 1; k = "i"; }"#,
+            r#"{ i = 1; k = "i"; }"#,
+        ),
+        ("({ a ? b, b ? a }: a) { b = 3; }", "3"),
+        (
+            r#"(rec { f = x: if x == 0 then "done" else f (x - 1); }).f 3"#,
+            r#""done""#,
+        ),
+        // `let` bindings shadow `with`, whichever is innermost.
+        ("with { a = 1; }; let a = 2; in a", "2"),
+        ("let a = 2; in with { a = 1; }; a", "2"),
+        ("with { a = 1; }; with { b = 2; }; let c = a + b; in c", "3"),
+        ("(x: y: z: x) 1 2 3", "1"),
+        (
+            r#"let xs = [ (throw "a") 2 ]; in builtins.elemAt xs 1"#,
+            "2",
+        ),
+    ] {
+        assert_eq!(ok(src), expected, "{src}");
+    }
+}
+
+#[test]
 fn builtins_and_dynamic_attrs() {
     assert_eq!(ok("map (x: x * 2) [ 1 2 3 ]"), "[ 2 4 6 ]");
     assert_eq!(ok("builtins.length (builtins.attrNames builtins)"), "118");
@@ -169,4 +203,32 @@ fn runtime_and_compiler_agree_on_paths() {
             "{path}"
         );
     }
+}
+
+/// Evaluates `src` on a thread with only `stack` bytes of stack.
+fn eval_with_stack(src: String, stack: usize) -> std::result::Result<String, String> {
+    std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || eval_here(&src))
+        .unwrap()
+        .join()
+        .expect("evaluation must fail with an error, not crash")
+}
+
+#[test]
+fn running_out_of_stack_is_an_error_like_nix() {
+    const STACK: usize = 4 * 1024 * 1024;
+    let overflow = Err("stack overflow (possible infinite recursion)".to_string());
+    // Deep syntax (Nix 2.28 reports this error for a sum of 200000 terms).
+    let sum = vec!["1"; 200_000].join(" + ");
+    assert_eq!(eval_with_stack(sum, STACK), overflow);
+    // Deep evaluation, still under max-call-depth.
+    let count = "let count = n: if n == 0 then 0 else 1 + count (n - 1); in count 9000";
+    assert_eq!(eval_with_stack(count.to_string(), STACK), overflow);
+    // Deep nesting either evaluates or fails the same way, depending on how
+    // much stack the build's frames use; it never crashes. (Depth 5000 keeps
+    // rnix's quadratic parse of nested lists fast.)
+    let lists = "[".repeat(5000) + &"]".repeat(5000);
+    let result = eval_with_stack(lists, STACK);
+    assert!(result.is_ok() || result == overflow, "{result:?}");
 }

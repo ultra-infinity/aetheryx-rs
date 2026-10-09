@@ -141,6 +141,10 @@ impl Value {
 
     /// Evaluates the value to weak head normal form.
     pub fn force(&self) -> Result<Data> {
+        if let Some(data) = self.peek() {
+            return Ok(data);
+        }
+        crate::stack::check()?;
         let pending = {
             let mut repr = self.0.borrow_mut();
             match &*repr {

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 builtins = { path = "../builtins" }
+stacker = "0.1.25"

@@ -314,7 +314,14 @@ impl Lowerer<'_> {
     // ─── Expressions ────────────────────────────────────────────────────────
 
     /// Lowers `expr` into `block`, locating the emitted ops at `expr`.
+    ///
+    /// Fails like Nix, with "stack overflow", when the expression nests too
+    /// deeply for the remaining stack.
     fn lower_expr(&mut self, block: Ptr<BasicBlock>, expr: &ast::Expr) -> Result<Value> {
+        if crate::stack::is_low() {
+            let range = expr.syntax().text_range();
+            return Err(Diag::new(ErrorKind::StackOverflow, range));
+        }
         self.at(expr.syntax().text_range(), |this| {
             this.lower_expr_here(block, expr)
         })
@@ -365,12 +372,13 @@ impl Lowerer<'_> {
                 Ok(self.emit(block, op))
             }
             Expr::AttrSet(set) => {
-                let group = Group::from_entries(set, set.rec_token().is_some(), Vec::new())?;
+                let rec = set.rec_token().is_some();
+                let group = Group::from_entries(set, rec, Vec::new(), self.file)?;
                 self.lower_group(block, group)
             }
             Expr::LetIn(let_in) => self.lower_let_in(block, let_in),
             Expr::LegacyLet(legacy) => {
-                let group = Group::from_entries(legacy, true, Vec::new())?;
+                let group = Group::from_entries(legacy, true, Vec::new(), self.file)?;
                 let set = self.lower_rec_attr_set(block, group)?;
                 let key = self.emit_str(block, "body");
                 let op = SelectOp::new(self.ctx, set, key);

@@ -128,12 +128,18 @@ impl SourceFile {
         self.source.inner()
     }
 
-    /// 1-based line and (character) column of a byte offset.
+    /// 1-based line and column of a byte offset. Like Nix, the column counts
+    /// bytes, so `é` (two bytes in UTF-8) advances it by 2.
     pub fn line_col(&self, offset: TextSize) -> (usize, usize) {
         let offset = usize::from(offset);
         let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
-        let col = self.text()[self.line_starts[line]..offset].chars().count();
-        (line + 1, col + 1)
+        (line + 1, offset - self.line_starts[line] + 1)
+    }
+
+    /// A position as Nix prints it in messages: `/abs/file.nix:line:column`.
+    pub fn position(&self, offset: TextSize) -> String {
+        let (line, column) = self.line_col(offset);
+        format!("{}:{line}:{column}", self.abs_path)
     }
 
     /// The IR location of `range`.
@@ -285,8 +291,9 @@ pub enum ErrorKind {
     Syntax,
     #[error("missing {0}")]
     Missing(&'static str),
-    #[error("attribute '{0}' already defined")]
-    DuplicateAttr(String),
+    /// `position` is where the attribute was first defined.
+    #[error("attribute '{name}' already defined at {position}")]
+    DuplicateAttr { name: String, position: String },
     #[error("duplicate formal function argument '{0}'")]
     DuplicateFormal(String),
     #[error("invalid integer '{0}'")]
@@ -299,6 +306,9 @@ pub enum ErrorKind {
     DynamicAttrNotAllowed(&'static str),
     #[error("cannot resolve '{0}': the home directory is unknown")]
     NoHomeDir(String),
+    /// The input nests too deeply for the remaining stack.
+    #[error("stack overflow (possible infinite recursion)")]
+    StackOverflow,
     /// An evaluation error; the message is Nix's.
     #[error("{0}")]
     Eval(String),
@@ -312,13 +322,14 @@ impl ErrorKind {
             ErrorKind::Parse(_) => "nix::parse",
             ErrorKind::Syntax => "nix::syntax",
             ErrorKind::Missing(_) => "nix::missing",
-            ErrorKind::DuplicateAttr(_) => "nix::duplicate_attr",
+            ErrorKind::DuplicateAttr { .. } => "nix::duplicate_attr",
             ErrorKind::DuplicateFormal(_) => "nix::duplicate_formal",
             ErrorKind::InvalidInteger(_) => "nix::invalid_integer",
             ErrorKind::InvalidFloat(_) => "nix::invalid_float",
             ErrorKind::UndefinedVariable(_) => "nix::undefined_variable",
             ErrorKind::DynamicAttrNotAllowed(_) => "nix::dynamic_attr",
             ErrorKind::NoHomeDir(_) => "nix::no_home_dir",
+            ErrorKind::StackOverflow => "nix::stack_overflow",
             ErrorKind::Eval(_) => "nix::eval",
             ErrorKind::Verify(_) => "nix::ir::verify",
         }
@@ -326,7 +337,7 @@ impl ErrorKind {
 
     fn help(&self) -> Option<&'static str> {
         match self {
-            ErrorKind::DuplicateAttr(_) => Some(
+            ErrorKind::DuplicateAttr { .. } => Some(
                 "attribute paths like `a.b = ...; a.c = ...;` are merged, \
                  but plain values cannot be",
             ),

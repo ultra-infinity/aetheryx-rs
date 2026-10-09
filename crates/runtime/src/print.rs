@@ -84,6 +84,7 @@ struct Printer {
 
 impl Printer {
     fn value(&mut self, value: &Value) -> Result<()> {
+        crate::stack::check()?;
         let data = value.force()?;
         match &data {
             Data::List(items) => {

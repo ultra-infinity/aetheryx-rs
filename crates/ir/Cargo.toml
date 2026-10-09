@@ -10,3 +10,4 @@ builtins = { path = "../builtins" }
 rowan = "0.16.1"
 miette = "7.6.0"
 thiserror = "2.0.21"
+stacker = "0.1.25"

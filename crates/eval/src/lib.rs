@@ -12,8 +12,16 @@
 //!   (`assertion '(! true)' failed`) and, for `==`, explains the difference.
 //! - For "called with unexpected argument", Nix reports the first unexpected
 //!   argument in its internal symbol order; this reports the first by name.
-//! - A duplicate dynamic attribute is reported without the position of its
-//!   first definition.
+//! - A duplicate *dynamic* attribute is reported without the position of its
+//!   first definition (static duplicates include it, as in Nix).
+//! - Resource limits differ:
+//!   - Nix's parser fails deep nesting with `memory exhausted` (its stack holds
+//!     10000 entries, e.g. 4999 nested lists or 3333 nested sets). That limit
+//!     is not reproduced.
+//!   - The rnix parser stops at 512 nested parentheses or lambdas, which Nix
+//!     accepts, and its parse time grows quadratically with nesting depth.
+//!   - Running out of stack fails with Nix's `stack overflow (possible
+//!     infinite recursion)`, but at a different depth than in Nix.
 //! - Not supported yet, each failing with an explicit error: search paths
 //!   (`<name>`, `findFile`), `import`, derivations and the store, copying
 //!   paths to the store in string interpolation, string contexts, and the
@@ -63,10 +71,10 @@ pub fn evaluate(
     file: &SourceFile,
     options: &LowerOptions,
 ) -> std::result::Result<String, EvalError> {
-    let parse = rnix::Root::parse(file.text());
+    let parse = ir::stack::parse(file.text());
     file.check_parse(parse.errors())?;
-    let hir = lower_root_with(&mut ctx, file, &parse.tree(), options)?;
-    let module = lower_module(&mut ctx, hir).map_err(|e| {
+    let module = lower_root_with(&mut ctx, file, &parse.tree(), options)?;
+    lower_module(&mut ctx, module).map_err(|e| {
         let span = span_of(&e.loc).map(|s| s.offset()..s.offset() + s.len());
         file.error_at(ErrorKind::Verify(e.err.to_string()), span)
     })?;
@@ -103,6 +111,7 @@ type Env = HashMap<MirValue, Value>;
 impl Interp {
     /// Runs the ops of `block` and returns the value it yields.
     fn run_block(self: &Rc<Self>, block: Ptr<BasicBlock>, env: &mut Env) -> Result<Value> {
+        runtime::stack::check()?;
         let ctx = &self.ctx;
         for op in block.deref(ctx).iter(ctx) {
             if Operation::get_op::<mir::YieldOp>(op, ctx).is_some() {

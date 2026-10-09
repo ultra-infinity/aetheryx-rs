@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use ir::ast_to_hir::{LowerOptions, lower_root};
 use ir::diagnostics::{ErrorKind, SourceFile, span_of};
 use ir::hir_to_mir::lower_module;
+use ir::stack::DeepDrop;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use pliron::builtin::ops::ModuleOp;
 use pliron::context::Context;
@@ -87,12 +88,12 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let ctx = &mut Context::new();
             for file in &files {
-                let (source, hir) = lower_to_hir(ctx, file)?;
-                let mir = lower_module(ctx, hir).map_err(|e| {
+                let (source, module) = lower_to_hir(ctx, file)?;
+                lower_module(ctx, module).map_err(|e| {
                     let span = span_of(&e.loc).map(|s| s.offset()..s.offset() + s.len());
                     source.error_at(ErrorKind::Verify(e.err.to_string()), span)
                 })?;
-                println!("{}", print_module(ctx, mir, no_locations));
+                println!("{}", print_module(ctx, module, no_locations));
             }
         }
     }
@@ -110,9 +111,9 @@ fn read_file(ctx: &Context, file: &Path) -> Result<SourceFile> {
 }
 
 /// Reads and parses `file`, failing on any parse error.
-fn parse_file(ctx: &Context, file: &Path) -> Result<(SourceFile, Parse<Root>)> {
+fn parse_file(ctx: &Context, file: &Path) -> Result<(SourceFile, DeepDrop<Parse<Root>>)> {
     let source = read_file(ctx, file)?;
-    let parse = Root::parse(source.text());
+    let parse = ir::stack::parse(source.text());
     source.check_parse(parse.errors())?;
     Ok((source, parse))
 }
@@ -132,6 +133,10 @@ fn print_module(ctx: &Context, module: ModuleOp, no_locations: bool) -> String {
 }
 
 fn print_node(node: &SyntaxNode, depth: usize) {
+    ir::stack::grow(|| print_node_here(node, depth));
+}
+
+fn print_node_here(node: &SyntaxNode, depth: usize) {
     println!("{:indent$}{:?}", "", node.kind(), indent = depth * 2);
     for child in node.children_with_tokens() {
         match child {

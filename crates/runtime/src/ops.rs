@@ -117,6 +117,7 @@ impl Drop for CallDepthGuard {
 /// more than [`MAX_CALL_DEPTH`] deep.
 pub fn call(func: &Data, arg: Value) -> Result<Value> {
     let _depth = CallDepthGuard::enter()?;
+    crate::stack::check()?;
     match func {
         Data::Lambda(lambda) => (lambda.body)(arg),
         Data::PrimOp(app) => {

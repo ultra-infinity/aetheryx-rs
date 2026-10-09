@@ -220,7 +220,7 @@ fn duplicate_attr_points_at_both_definitions() {
     let Err(err) = res else {
         panic!("expected an error")
     };
-    assert!(matches!(&err.kind, ErrorKind::DuplicateAttr(n) if n == "a"));
+    assert!(matches!(&err.kind, ErrorKind::DuplicateAttr { name, .. } if name == "a"));
     let labels: Vec<SourceSpan> = err.labels().unwrap().map(|l| *l.inner()).collect();
     assert_eq!(labels, [SourceSpan::from(9..10), SourceSpan::from(2..3)]);
 }
@@ -228,7 +228,7 @@ fn duplicate_attr_points_at_both_definitions() {
 fn duplicate_name(src: &str) -> String {
     match try_lower(src).1 {
         Err(SourceError {
-            kind: ErrorKind::DuplicateAttr(name),
+            kind: ErrorKind::DuplicateAttr { name, .. },
             ..
         }) => name,
         Err(e) => panic!("unexpected error: {e}"),
@@ -253,6 +253,72 @@ fn duplicate_attr_names_use_full_path() {
     assert_eq!(duplicate_name("{ a = rec { x = 1; }; a.x = 2; }"), "a.x");
     // A duplicate inside a single literal is reported relative to it.
     assert_eq!(duplicate_name("{ x = { a = 1; a = 2; }; x.b = 3; }"), "a");
+}
+
+/// The message of the error lowering `src` (as `/work/sub/test.nix`) fails with.
+fn error_message(src: &str) -> String {
+    match try_lower(src).1 {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected an error for {src}"),
+    }
+}
+
+// Expected messages are what Nix 2.28 prints for the same file contents, with
+// the file at /work/sub/test.nix.
+#[test]
+fn duplicate_attr_messages_give_the_first_definition() {
+    for (src, expected) in [
+        (
+            "{ a = 1; a = 2; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:3",
+        ),
+        (
+            "{ a.b = 1; a.b = 2; }",
+            "attribute 'a.b' already defined at /work/sub/test.nix:1:3",
+        ),
+        (
+            "{ a.b = 1; a = 2; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:3",
+        ),
+        (
+            "{ a = { b = 1; }; a = { b = 2; }; }",
+            "attribute 'a.b' already defined at /work/sub/test.nix:1:9",
+        ),
+        (
+            "{ x = { a = 1; a = 2; }; x.b = 3; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:9",
+        ),
+        (
+            "{\n  a = 1;\n  a = 2;\n}",
+            "attribute 'a' already defined at /work/sub/test.nix:2:3",
+        ),
+        (
+            "let a = 1; a = 2; in a",
+            "attribute 'a' already defined at /work/sub/test.nix:1:5",
+        ),
+        (
+            "{ inherit ({a=1;}) a; a = 2; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:20",
+        ),
+        (
+            "{ a = 1; inherit ({a=1;}) a; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:3",
+        ),
+        // Columns count bytes: `é` is two.
+        (
+            "{ x = \"é\"; a = 1; a = 2; }",
+            "attribute 'a' already defined at /work/sub/test.nix:1:13",
+        ),
+    ] {
+        assert_eq!(error_message(src), expected, "{src}");
+    }
+}
+
+#[test]
+fn cur_pos_columns_count_bytes() {
+    // Nix 2.28: `{ x = "é"; p = __curPos; }` has `p.column == 17`.
+    let ir = lower("{ x = \"é\"; p = __curPos; }");
+    assert!(ir.contains("Int(17)"), "{ir}");
 }
 
 #[test]

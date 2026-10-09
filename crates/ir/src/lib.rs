@@ -14,6 +14,7 @@
 //! - [`ast_to_hir`]: lowering from the rnix AST to `nix_hir`.
 //! - [`diagnostics`]: source files, IR source locations and error reporting.
 //! - [`paths`]: Nix's parse-time path resolution.
+//! - [`stack`]: running deeply recursive code without overflowing the stack.
 
 pub mod ast_to_hir;
 pub mod builtins_dialect;
@@ -22,5 +23,6 @@ pub mod hir;
 pub mod hir_to_mir;
 pub mod mir;
 pub mod paths;
+pub mod stack;
 #[cfg(test)]
 mod test_util;

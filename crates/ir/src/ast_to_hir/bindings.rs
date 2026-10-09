@@ -7,12 +7,12 @@ use pliron::basic_block::BasicBlock;
 use pliron::context::Ptr;
 use pliron::op::Op;
 use pliron::value::Value;
-use rnix::TextRange;
 use rnix::ast::{self, HasEntry, InterpolPart};
+use rnix::{TextRange, TextSize};
 use rowan::ast::AstNode;
 
 use super::{Binding, Lowerer, Result, ident_name};
-use crate::diagnostics::{Diag, ErrorKind};
+use crate::diagnostics::{Diag, ErrorKind, SourceFile};
 use crate::hir::{
     AttrSetOp, BindOp, DynBindOp, LetInOp, RecAttrSetOp, SelectOp, add_region_block, result_of,
 };
@@ -49,6 +49,18 @@ struct Entry {
     node: Node,
     /// The whole binding (`a.b = 1;` / `inherit (x) a;`) in the source.
     range: TextRange,
+    /// Where Nix says the attribute is defined: the start of the attribute
+    /// path (`a.b`, also for the nested `b`), or the inherited name.
+    defined_at: TextSize,
+}
+
+/// Where a binding is in the source.
+#[derive(Clone, Copy)]
+struct Definition {
+    /// The whole binding.
+    range: TextRange,
+    /// See [`Entry::defined_at`].
+    defined_at: TextSize,
 }
 
 /// The bindings of one attribute set / let, with attribute paths merged.
@@ -81,17 +93,20 @@ impl Group {
         }
     }
 
+    /// The merged bindings of `node`. `file` is the file being lowered, for
+    /// the positions in duplicate-attribute errors.
     pub(super) fn from_entries<N: HasEntry>(
         node: &N,
         rec: bool,
         path: Vec<String>,
+        file: &SourceFile,
     ) -> Result<Self> {
         let mut group = Group::new(rec, path);
-        group.add_entries(node)?;
+        group.add_entries(node, file)?;
         Ok(group)
     }
 
-    fn add_entries<N: HasEntry>(&mut self, node: &N) -> Result<()> {
+    fn add_entries<N: HasEntry>(&mut self, node: &N, file: &SourceFile) -> Result<()> {
         for entry in node.entries() {
             let range = entry.syntax().text_range();
             match entry {
@@ -100,7 +115,11 @@ impl Group {
                     let path = apv.attrpath().ok_or_else(|| missing("attribute path"))?;
                     let keys = path.attrs().map(key_of).collect::<Vec<_>>();
                     let value = apv.value().ok_or_else(|| missing("binding value"))?;
-                    self.insert(&keys, Node::Expr(value), range)?;
+                    let at = Definition {
+                        range,
+                        defined_at: path.syntax().text_range().start(),
+                    };
+                    self.insert(&keys, Node::Expr(value), at, file)?;
                 }
                 ast::Entry::Inherit(inherit) => {
                     let from = inherit.from().and_then(|f| f.expr()).map(|e| {
@@ -119,7 +138,11 @@ impl Group {
                             Some(idx) => Node::InheritFrom(idx, name.clone()),
                             None => Node::Inherit(name.clone()),
                         };
-                        self.insert(&[key], node, range)?;
+                        let at = Definition {
+                            range,
+                            defined_at: key.range().start(),
+                        };
+                        self.insert(&[key], node, at, file)?;
                     }
                 }
             }
@@ -136,7 +159,14 @@ impl Group {
         self.path.iter().cloned().chain([segment]).collect()
     }
 
-    fn insert(&mut self, path: &[Key], node: Node, range: TextRange) -> Result<()> {
+    fn insert(
+        &mut self,
+        path: &[Key],
+        node: Node,
+        at: Definition,
+        file: &SourceFile,
+    ) -> Result<()> {
+        let Definition { range, defined_at } = at;
         let (first, rest) = path
             .split_first()
             .ok_or_else(|| Diag::new(ErrorKind::Missing("attribute path"), range))?;
@@ -155,36 +185,39 @@ impl Group {
                 node
             } else {
                 let mut group = Group::new(false, child_path);
-                group.insert(rest, node, range)?;
+                group.insert(rest, node, at, file)?;
                 Node::Group(group)
             };
             self.entries.push(Entry {
                 key: first.clone(),
                 node,
                 range,
+                defined_at,
             });
             return Ok(());
         };
 
         let new_is_set = matches!(node, Node::Expr(ast::Expr::AttrSet(_)));
         if !(new_is_set || !rest.is_empty()) || !self.entries[idx].node.is_mergeable() {
-            return Err(Diag::new(
-                ErrorKind::DuplicateAttr(child_path.join(".")),
-                first.range(),
-            )
-            .with_label(self.entries[idx].key.range(), "first defined here"));
+            let first_definition = &self.entries[idx];
+            let kind = ErrorKind::DuplicateAttr {
+                name: child_path.join("."),
+                position: file.position(first_definition.defined_at),
+            };
+            return Err(Diag::new(kind, first.range())
+                .with_label(first_definition.key.range(), "first defined here"));
         }
-        self.entries[idx].node.make_group(child_path)?;
+        self.entries[idx].node.make_group(child_path, file)?;
         let Node::Group(group) = &mut self.entries[idx].node else {
             unreachable!("mergeable nodes become groups");
         };
         match node {
             Node::Expr(ast::Expr::AttrSet(set)) if rest.is_empty() => {
                 // Duplicates within the literal itself are reported relative to it.
-                Group::from_entries(&set, false, Vec::new())?;
-                group.add_entries(&set)
+                Group::from_entries(&set, false, Vec::new(), file)?;
+                group.add_entries(&set, file)
             }
-            node => group.insert(rest, node, range),
+            node => group.insert(rest, node, at, file),
         }
     }
 
@@ -207,12 +240,12 @@ impl Node {
 
     /// Turns an attribute set literal at `path` into a mergeable [`Group`],
     /// keeping its `rec`-ness.
-    fn make_group(&mut self, path: Vec<String>) -> Result<()> {
+    fn make_group(&mut self, path: Vec<String>, file: &SourceFile) -> Result<()> {
         if let Node::Expr(ast::Expr::AttrSet(set)) = self {
             let rec = set.rec_token().is_some();
             // Duplicates within the literal itself are reported relative to it.
-            Group::from_entries(set, rec, Vec::new())?;
-            *self = Node::Group(Group::from_entries(set, rec, path)?);
+            Group::from_entries(set, rec, Vec::new(), file)?;
+            *self = Node::Group(Group::from_entries(set, rec, path, file)?);
         }
         Ok(())
     }
@@ -279,7 +312,7 @@ impl Lowerer<'_> {
         block: Ptr<BasicBlock>,
         let_in: &ast::LetIn,
     ) -> Result<Value> {
-        let group = Group::from_entries(let_in, false, Vec::new())?;
+        let group = Group::from_entries(let_in, false, Vec::new(), self.file)?;
         if let Some(e) = group
             .entries
             .iter()
@@ -345,7 +378,10 @@ impl Lowerer<'_> {
         inherited: &HashMap<String, Value>,
     ) -> Result<()> {
         let mut froms: HashMap<usize, Value> = HashMap::new();
-        for Entry { key, node, range } in group.entries {
+        for Entry {
+            key, node, range, ..
+        } in group.entries
+        {
             let value = match node {
                 Node::Expr(e) => self.lower_expr(block, &e)?,
                 Node::Group(g) => self.at(range, |this| this.lower_group(block, g))?,

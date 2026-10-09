@@ -9,6 +9,7 @@ pub mod ops;
 pub mod paths;
 pub mod primops;
 pub mod print;
+pub mod stack;
 pub mod value;
 
 pub use error::{Error, Result};

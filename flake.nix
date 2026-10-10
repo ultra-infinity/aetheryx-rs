@@ -96,6 +96,9 @@
           # `nix develop`: the toolchain of the checks, plus editor support.
           devShells.default = craneLib.devShell {
             checks = self'.checks;
+            # nixpkgs' rustc has no `rust-src` component; rust-analyzer
+            # needs the standard library's sources.
+            RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             packages = with pkgs; [
               rust-analyzer
               rustup

@@ -1,5 +1,5 @@
 # Pipe operators (experimental in Nix; evaluate with
-#   nix-instantiate --eval --strict --extra-experimental-features pipe-operators)
+#   nix eval --extra-experimental-features pipe-operators --file 14-pipe-operators.nix)
 let
   double = x: x * 2;
   inc = x: x + 1;

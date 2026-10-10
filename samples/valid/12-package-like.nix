@@ -1,6 +1,6 @@
 # A realistic nixpkgs-style package function. Evaluating this file returns a
 # function; call it with stub arguments to evaluate the body without nixpkgs:
-#   nix-instantiate --eval --strict -E 'import ./12-package-like.nix {
+#   nix eval --expr 'import ./12-package-like.nix {
 #     lib = { licenses.mit = "MIT"; optional = c: x: if c then [ x ] else [ ]; };
 #     stdenv = { mkDerivation = a: a; }; fetchurl = a: a.url; openssl = "openssl"; }'
 { lib

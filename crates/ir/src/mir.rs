@@ -152,8 +152,10 @@ pub struct LetrecOp;
     name = "nix_mir.lambda",
     // A closure. The region's block arguments are the argument (a thunk)
     // followed by the captures; it yields the result. The optional name is
-    // the binding the lambda is defined in, which Nix reports in errors.
-    format = "opt_attr($mir_lambda_name, $StringAttr, label($name), delimiters(`[`, `]`)) `(` operands(CharSpace(`,`)) `) : ` type($0) ` ` region($0)",
+    // the binding the lambda is defined in, which Nix reports in errors; the
+    // optional formals are its `{ a, b ? x, ... }` pattern, which calling it
+    // with `--arg` values needs.
+    format = "opt_attr($mir_lambda_name, $StringAttr, label($name), delimiters(`[`, `]`)) opt_attr($mir_lambda_formals, $FormalsSpec, label($formals), delimiters(`[`, `]`)) `(` operands(CharSpace(`,`)) `) : ` type($0) ` ` region($0)",
     interfaces = [
         NRegionsInterface<1>,
         SingleBlockRegionInterface,
@@ -161,7 +163,7 @@ pub struct LetrecOp;
         NResultsInterface<1>,
         ResultNOfType<0, ValueType>,
     ],
-    attributes = (mir_lambda_name: StringAttr)
+    attributes = (mir_lambda_name: StringAttr, mir_lambda_formals: FormalsSpec)
 )]
 pub struct LambdaOp;
 
@@ -551,6 +553,16 @@ impl LambdaOp {
     pub fn name(&self, ctx: &Context) -> Option<String> {
         self.get_attr_mir_lambda_name(ctx)
             .map(|name| name.as_str().to_string())
+    }
+
+    /// Records the lambda's `{ a, b ? x, ... }` pattern.
+    pub fn set_formals(&self, ctx: &Context, formals: FormalsSpec) {
+        self.set_attr_mir_lambda_formals(ctx, formals);
+    }
+
+    /// The lambda's `{ a, b ? x, ... }` pattern, if it has one.
+    pub fn formals(&self, ctx: &Context) -> Option<FormalsSpec> {
+        self.get_attr_mir_lambda_formals(ctx).map(|f| f.clone())
     }
 
     /// Captures `value`; returns the block argument to use inside the body.

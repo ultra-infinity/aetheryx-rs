@@ -1,13 +1,12 @@
 //! The oracle test: every sample in `samples/valid` must evaluate to exactly
-//! what real Nix printed for it (`samples/expected`, from
+//! what `nix eval --file` printed for it (`samples/expected`, from
 //! `samples/gen-expected.sh`).
 
 use std::path::{Path, PathBuf};
 
-use eval::evaluate;
+use eval::Program;
 use ir::ast_to_hir::LowerOptions;
-use ir::diagnostics::SourceFile;
-use pliron::context::Context;
+use runtime::print::print_value;
 
 /// Samples that use features not supported yet, with the reason.
 const UNSUPPORTED: &[(&str, &str)] = &[(
@@ -26,13 +25,16 @@ fn samples_dir() -> PathBuf {
 
 fn evaluate_sample(name: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(samples_dir().join(format!("valid/{name}.nix"))).unwrap();
-    let ctx = Context::new();
     let path = format!("samples/valid/{name}.nix");
-    let file = SourceFile::with_cwd(&ctx, path, text, Path::new(ROOT)).unwrap();
     let options = LowerOptions {
         home_dir: Some(HOME.to_string()),
     };
-    evaluate(ctx, &file, &options).map_err(|e| e.to_string())
+    let mut program = Program::new(options);
+    let id = program
+        .add_file(path, text, Path::new(ROOT))
+        .map_err(|e| e.to_string())?;
+    let session = program.start();
+    print_value(&session.value(id)).map_err(|e| session.error(e).to_string())
 }
 
 fn expected(name: &str) -> String {

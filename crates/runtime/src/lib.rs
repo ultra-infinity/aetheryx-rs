@@ -5,6 +5,7 @@
 //! single pointer.
 
 pub mod error;
+pub mod json;
 pub mod ops;
 pub mod paths;
 pub mod primops;
@@ -12,6 +13,6 @@ pub mod print;
 pub mod stack;
 pub mod value;
 
-pub use error::{Error, Result};
+pub use error::{Error, Origin, Result};
 pub use primops::Builtins;
-pub use value::{Attrs, Data, Lambda, PrimOp, PrimOpApp, PrimOpFn, Value};
+pub use value::{Attrs, Data, Formals, Lambda, LambdaInfo, PrimOp, PrimOpApp, PrimOpFn, Value};

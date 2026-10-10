@@ -23,6 +23,7 @@ use pliron::combine::stream::position::SourcePosition;
 use pliron::context::Context;
 use pliron::derive::pliron_attr;
 use pliron::location::{Location, Source};
+use pliron::uniqued_any;
 use rnix::{ParseError, SyntaxKind, TextRange, TextSize};
 use thiserror::Error;
 
@@ -50,14 +51,55 @@ pub fn span_of(loc: &Location) -> Option<SourceSpan> {
     }
 }
 
-/// A Nix source file being compiled.
+/// The position of a location created by [`SourceFile::location`], as Nix
+/// prints positions: `/abs/file.nix:3:7`, or `«string»:3:7`.
+pub fn position_of(ctx: &Context, loc: &Location) -> Option<String> {
+    match loc {
+        Location::Fused { locations, .. } => locations.iter().find_map(|l| position_of(ctx, l)),
+        Location::SrcPos {
+            src: Source::File(file),
+            pos,
+        } => Some(format!(
+            "{}:{}:{}",
+            uniqued_any::get(ctx, *file).display(),
+            pos.line,
+            pos.column
+        )),
+        Location::Named { child_loc, .. } => position_of(ctx, child_loc),
+        _ => None,
+    }
+}
+
+/// The name of the source of a location created by [`SourceFile::location`]
+/// (what [`SourceFile::abs_path`] returns).
+pub fn source_name_of(ctx: &Context, loc: &Location) -> Option<String> {
+    match loc {
+        Location::Fused { locations, .. } => locations.iter().find_map(|l| source_name_of(ctx, l)),
+        Location::SrcPos {
+            src: Source::File(file),
+            ..
+        } => Some(uniqued_any::get(ctx, *file).display().to_string()),
+        Location::Named { child_loc, .. } => source_name_of(ctx, child_loc),
+        _ => None,
+    }
+}
+
+/// The name Nix gives the source of an `--expr` expression.
+pub const EXPR_NAME: &str = "«string»";
+
+/// A Nix source being compiled: a file, or an expression given on the
+/// command line.
 pub struct SourceFile {
     /// The path as given, used when displaying diagnostics.
     path: PathBuf,
-    /// The path made absolute and normalized the way Nix does it (against the
-    /// current directory, without resolving symlinks). Used for `__curPos`,
-    /// for resolving relative path literals, and for IR locations.
+    /// For a file, its path made absolute and normalized the way Nix does it
+    /// (against the current directory, without resolving symlinks); for an
+    /// expression, [`EXPR_NAME`]. Positions show this name.
     abs_path: String,
+    /// The directory relative path literals are resolved against.
+    base_dir: String,
+    /// Whether this is an expression rather than a file.
+    is_expr: bool,
     /// The file's text, shared with the errors reported against it.
     source: Arc<NamedSource<String>>,
     src: Source,
@@ -95,18 +137,55 @@ impl SourceFile {
             })
         };
         let abs_path = paths::abs_path(&utf8(&path)?, &utf8(cwd)?);
+        let base_dir = paths::dir_of(&abs_path).to_string();
+        Ok(Self::build(ctx, path, abs_path, base_dir, false, text))
+    }
+
+    /// An expression given on the command line (`--expr`), whose relative
+    /// paths resolve against `cwd`. Like Nix, its positions show
+    /// [`EXPR_NAME`], and `__curPos` in it is `null`.
+    ///
+    /// Fails if `cwd` is not valid UTF-8.
+    pub fn expr(ctx: &Context, text: impl Into<String>, cwd: &Path) -> std::io::Result<Self> {
+        let cwd = cwd.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("path is not valid UTF-8: {}", cwd.display()),
+            )
+        })?;
+        let base_dir = paths::abs_path(".", cwd);
+        Ok(Self::build(
+            ctx,
+            EXPR_NAME.into(),
+            EXPR_NAME.to_string(),
+            base_dir,
+            true,
+            text.into(),
+        ))
+    }
+
+    fn build(
+        ctx: &Context,
+        path: PathBuf,
+        abs_path: String,
+        base_dir: String,
+        is_expr: bool,
+        text: String,
+    ) -> Self {
         let line_starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
         let src = Source::new_from_file(ctx, abs_path.clone());
         let source = Arc::new(NamedSource::new(path.display().to_string(), text));
-        Ok(SourceFile {
+        SourceFile {
             path,
             abs_path,
+            base_dir,
+            is_expr,
             source,
             src,
             line_starts,
-        })
+        }
     }
 
     /// The path as given.
@@ -114,14 +193,21 @@ impl SourceFile {
         &self.path
     }
 
-    /// The normalized absolute path, as Nix reports it in `__curPos.file`.
+    /// The name positions show: the normalized absolute path of a file, or
+    /// [`EXPR_NAME`].
     pub fn abs_path(&self) -> &str {
         &self.abs_path
     }
 
+    /// The file `__curPos` reports, or `None` for an expression, where Nix
+    /// makes `__curPos` `null`.
+    pub fn cur_pos_file(&self) -> Option<&str> {
+        (!self.is_expr).then_some(self.abs_path.as_str())
+    }
+
     /// The directory that relative path literals are resolved against.
     pub fn base_dir(&self) -> &str {
-        paths::dir_of(&self.abs_path)
+        &self.base_dir
     }
 
     pub fn text(&self) -> &str {

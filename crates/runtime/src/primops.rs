@@ -524,7 +524,7 @@ fn prim_map_attrs(args: &[Value]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::print::print_strict;
+    use crate::print::print_value;
 
     // Expected outputs are what Nix 2.28 prints for the same calls.
 
@@ -538,7 +538,7 @@ mod tests {
         for arg in args {
             f = call(&f.force()?, arg)?;
         }
-        print_strict(&f)
+        print_value(&f)
     }
 
     fn ints(xs: &[i64]) -> Value {

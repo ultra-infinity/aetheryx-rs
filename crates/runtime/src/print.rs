@@ -1,4 +1,4 @@
-//! Printing values the way `nix-instantiate --eval` does.
+//! Printing values the way `nix eval` does.
 
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -6,13 +6,16 @@ use std::fmt::Write;
 use crate::error::Result;
 use crate::value::{Data, Value};
 
-/// Prints `value` like `nix-instantiate --eval --strict`: evaluated deeply.
-pub fn print_strict(value: &Value) -> Result<String> {
+/// Prints `value` like `nix eval`: evaluated deeply. An error evaluating
+/// `value` itself is returned; an error inside it is printed in its place,
+/// as `«error: message»`.
+pub fn print_value(value: &Value) -> Result<String> {
     let mut printer = Printer {
         out: String::new(),
         seen: HashSet::new(),
     };
-    printer.value(value)?;
+    let data = value.force()?;
+    printer.data(&data);
     Ok(printer.out)
 }
 
@@ -64,14 +67,7 @@ fn error_value(out: &mut String, data: &Data) {
             }
             out.push_str(" }");
         }
-        other => {
-            let mut printer = Printer {
-                out: String::new(),
-                seen: HashSet::new(),
-            };
-            printer.scalar(other);
-            out.push_str(&printer.out);
-        }
+        other => scalar(out, other),
     }
 }
 
@@ -83,63 +79,75 @@ struct Printer {
 }
 
 impl Printer {
-    fn value(&mut self, value: &Value) -> Result<()> {
-        crate::stack::check()?;
-        let data = value.force()?;
-        match &data {
+    /// Prints a value nested in the one being printed: an error evaluating
+    /// it is printed in its place.
+    fn nested(&mut self, value: &Value) {
+        match crate::stack::check().and_then(|()| value.force()) {
+            Ok(data) => self.data(&data),
+            Err(error) => write!(self.out, "«error: {}»", error.message).unwrap(),
+        }
+    }
+
+    fn data(&mut self, data: &Data) {
+        match data {
             Data::List(items) => {
                 if items.is_empty() {
                     self.out.push_str("[ ]");
-                    return Ok(());
+                    return;
                 }
                 if !self.seen.insert(items.as_ptr().cast()) {
                     self.out.push_str("«repeated»");
-                    return Ok(());
+                    return;
                 }
                 self.out.push('[');
                 for item in items.iter() {
                     self.out.push(' ');
-                    self.value(item)?;
+                    self.nested(item);
                 }
                 self.out.push_str(" ]");
             }
             Data::Attrs(attrs) => {
                 if attrs.is_empty() {
                     self.out.push_str("{ }");
-                    return Ok(());
+                    return;
                 }
                 if !self.seen.insert(std::rc::Rc::as_ptr(attrs).cast()) {
                     self.out.push_str("«repeated»");
-                    return Ok(());
+                    return;
                 }
                 self.out.push('{');
                 for (name, value) in attrs.iter() {
                     self.out.push(' ');
                     self.out.push_str(&attr_name(name));
                     self.out.push_str(" = ");
-                    self.value(value)?;
+                    self.nested(value);
                     self.out.push(';');
                 }
                 self.out.push_str(" }");
             }
-            other => self.scalar(other),
+            other => scalar(&mut self.out, other),
         }
-        Ok(())
     }
+}
 
-    fn scalar(&mut self, data: &Data) {
-        match data {
-            Data::Null => self.out.push_str("null"),
-            Data::Bool(b) => self.out.push_str(if *b { "true" } else { "false" }),
-            Data::Int(i) => write!(self.out, "{i}").unwrap(),
-            Data::Float(f) => self.out.push_str(&format_float(*f)),
-            Data::String(s) => self.out.push_str(&quote_string(s)),
-            Data::Path(p) => self.out.push_str(p),
-            Data::Lambda(_) => self.out.push_str("<LAMBDA>"),
-            Data::PrimOp(app) if app.args.is_empty() => self.out.push_str("<PRIMOP>"),
-            Data::PrimOp(_) => self.out.push_str("<PRIMOP-APP>"),
-            Data::List(_) | Data::Attrs(_) => unreachable!("handled by the caller"),
+/// A value that is not a list or a set.
+fn scalar(out: &mut String, data: &Data) {
+    match data {
+        Data::Null => out.push_str("null"),
+        Data::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Data::Int(i) => write!(out, "{i}").unwrap(),
+        Data::Float(f) => out.push_str(&format_float(*f)),
+        Data::String(s) => out.push_str(&quote_string(s)),
+        Data::Path(p) => out.push_str(p),
+        Data::Lambda(lambda) => match &lambda.info.name {
+            Some(name) => write!(out, "«lambda {name} @ {}»", lambda.info.pos).unwrap(),
+            None => write!(out, "«lambda @ {}»", lambda.info.pos).unwrap(),
+        },
+        Data::PrimOp(app) if app.args.is_empty() => {
+            write!(out, "«primop {}»", app.op.name).unwrap();
         }
+        Data::PrimOp(app) => write!(out, "«partially applied primop {}»", app.op.name).unwrap(),
+        Data::List(_) | Data::Attrs(_) => unreachable!("handled by the caller"),
     }
 }
 
@@ -219,10 +227,13 @@ pub fn attr_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::value::Attrs;
+    use std::rc::Rc;
 
-    // Expected strings are what Nix 2.28 prints.
+    use super::*;
+    use crate::error::Error;
+    use crate::value::{Attrs, LambdaInfo};
+
+    // Expected strings are what `nix eval` (Nix 2.28) prints.
 
     #[test]
     fn floats() {
@@ -284,16 +295,50 @@ mod tests {
     fn repeated_values() {
         let list = Value::list(vec![Value::int(1)]);
         let outer = Value::list(vec![list.clone(), list]);
-        assert_eq!(print_strict(&outer).unwrap(), "[ [ 1 ] «repeated» ]");
+        assert_eq!(print_value(&outer).unwrap(), "[ [ 1 ] «repeated» ]");
         let empty = Value::list(Vec::new());
         let outer = Value::list(vec![empty.clone(), empty]);
-        assert_eq!(print_strict(&outer).unwrap(), "[ [ ] [ ] ]");
+        assert_eq!(print_value(&outer).unwrap(), "[ [ ] [ ] ]");
         let mut attrs = Attrs::new();
         attrs.insert("b".into(), Value::int(2));
         attrs.insert("a".into(), Value::string("x"));
         assert_eq!(
-            print_strict(&Value::attrs(attrs)).unwrap(),
+            print_value(&Value::attrs(attrs)).unwrap(),
             r#"{ a = "x"; b = 2; }"#
+        );
+    }
+
+    #[test]
+    fn errors_inside_values_are_printed_in_place() {
+        // nix eval --expr '{ a = { b = throw "deep"; }; c = 1; }'
+        let failing = Value::thunk(|| Err(Error::new("deep")));
+        let inner = Value::attrs(Attrs::from([("b".into(), failing)]));
+        let outer = Value::attrs(Attrs::from([
+            ("a".into(), inner),
+            ("c".into(), Value::int(1)),
+        ]));
+        assert_eq!(
+            print_value(&outer).unwrap(),
+            "{ a = { b = «error: deep»; }; c = 1; }"
+        );
+        // An error evaluating the value itself is an error.
+        let top = Value::thunk(|| Err(Error::new("top")));
+        assert_eq!(print_value(&top).unwrap_err().message, "top");
+    }
+
+    #[test]
+    fn functions() {
+        let info = |name: Option<&str>| LambdaInfo {
+            name: name.map(Rc::from),
+            pos: "/w/f.nix:1:7".into(),
+            formals: None,
+        };
+        let named = Value::lambda(Rc::new(info(Some("f"))), Ok);
+        let anonymous = Value::lambda(Rc::new(info(None)), Ok);
+        let list = Value::list(vec![named, anonymous]);
+        assert_eq!(
+            print_value(&list).unwrap(),
+            "[ «lambda f @ /w/f.nix:1:7» «lambda @ /w/f.nix:1:7» ]"
         );
     }
 }

@@ -6,7 +6,9 @@ use pliron::builtin::attributes::TypeAttr;
 use pliron::builtin::ops::FuncOp;
 use pliron::derive::op_interface_impl;
 use pliron::irbuild::rewriter::Rewriter;
+use pliron::linked_list::ContainsLinkedList;
 use pliron::op::Op;
+use pliron::operation::Operation;
 use pliron::result::Result;
 use pliron::r#type::{Typed, type_cast};
 use pliron::value::Value;
@@ -61,6 +63,21 @@ impl ToMIRDialect for hir::LambdaOp {
         let lambda = mir::LambdaOp::new(b.ctx);
         if let Some(name) = state.scopes.lambda_names.get(&self.get_operation()) {
             lambda.set_name(b.ctx, name);
+        }
+        // The pattern is checked by the `nix_hir.formals` on the argument.
+        let pattern = hir_body
+            .deref(b.ctx)
+            .iter(b.ctx)
+            .filter_map(|op| Operation::get_op::<hir::FormalsOp>(op, b.ctx))
+            .find(|formals| formals.get_operation().deref(b.ctx).get_operand(0) == hir_arg)
+            .map(|formals| {
+                formals
+                    .get_attr_formals(b.ctx)
+                    .expect("formals have a pattern")
+                    .clone()
+            });
+        if let Some(pattern) = pattern {
+            lambda.set_formals(b.ctx, pattern);
         }
         b.insert(&lambda);
         let arg = lambda.argument(b.ctx);

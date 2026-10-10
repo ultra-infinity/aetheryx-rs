@@ -1,7 +1,7 @@
 //! The semantics of the `nix_mir` operations.
 //!
 //! Evaluation order and error messages follow Nix 2.28; every message here
-//! was checked against `nix-instantiate`.
+//! was checked against Nix.
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -149,6 +149,56 @@ pub fn call(func: &Data, arg: Value) -> Result<Value> {
             other.type_name(),
             print_for_error(other)
         ))),
+    }
+}
+
+/// Calls a function given on the command line with the `--arg` / `--argstr`
+/// values `args`, as Nix's `autoCallFunction` does. Only a lambda with a
+/// `{ ... }` pattern is called (with the arguments it names, or all of them
+/// if it has `...`); a set with `__functor` is first applied to itself; any
+/// other value is returned as it is.
+pub fn auto_call(func: &Data, args: &Attrs) -> Result<Value> {
+    match func {
+        Data::Attrs(attrs) if attrs.contains_key("__functor") => {
+            let functor = attrs["__functor"].force()?;
+            let applied = call(&functor, Value::ready(func.clone()))?.force()?;
+            auto_call(&applied, args)
+        }
+        Data::Lambda(lambda) => {
+            let Some(formals) = &lambda.info.formals else {
+                return Ok(Value::ready(func.clone()));
+            };
+            let arg: Attrs = if formals.ellipsis {
+                args.clone()
+            } else {
+                let mut arg = Attrs::new();
+                for (name, has_default) in &formals.names {
+                    match args.get(name) {
+                        Some(value) => {
+                            arg.insert(name.clone(), value.clone());
+                        }
+                        None if *has_default => {}
+                        None => {
+                            return Err(Error::new(format!(
+                                "cannot evaluate a function that has an argument without a \
+                                 value ('{name}')\n\
+                                 Nix attempted to evaluate a function as a top level \
+                                 expression; in\n\
+                                 this case it must have its arguments supplied either by \
+                                 default\n\
+                                 values, or passed explicitly with '--arg' or '--argstr'. \
+                                 See\n\
+                                 https://nixos.org/manual/nix/stable/language/constructs.\
+                                 html#functions."
+                            )));
+                        }
+                    }
+                }
+                arg
+            };
+            call(func, Value::attrs(arg))
+        }
+        _ => Ok(Value::ready(func.clone())),
     }
 }
 
@@ -635,7 +685,14 @@ mod tests {
 
     #[test]
     fn function_equality_uses_pointers_inside_containers() {
-        let f = Value::lambda(None, Ok);
+        let f = Value::lambda(
+            Rc::new(crate::value::LambdaInfo {
+                name: None,
+                pos: "/w/f.nix:1:1".into(),
+                formals: None,
+            }),
+            Ok,
+        );
         let data = f.force().unwrap();
         assert!(!equal(&data, &data).unwrap());
         let a = Data::List(vec![f.clone()].into());

@@ -1,4 +1,4 @@
-//! The reference interpreter for `nix_mir`.
+//! The reference interpreter for `nix_mir`, and [`nix_eval`] on top of it.
 //!
 //! It executes the MIR op by op, calling the [`runtime`] for the semantics of
 //! each op, so it is the oracle that compiled code will be checked against.
@@ -6,8 +6,12 @@
 //! their captures; `if` regions run in place.
 //!
 //! # Differences from Nix
-//! Output and error messages match Nix 2.28 (`samples/expected` is checked
-//! byte for byte), except:
+//! Output and error messages match `nix eval` in Nix 2.28
+//! (`samples/expected` is checked byte for byte), except:
+//! - Errors are rendered with miette, without Nix's `… while evaluating`
+//!   traces.
+//! - Paths in an `--expr` expression print as plain paths; Nix prefixes them
+//!   with `«unknown»`.
 //! - A failed `assert` reports `assertion failed`. Nix reprints the condition
 //!   (`assertion '(! true)' failed`) and, for `==`, explains the difference.
 //! - For "called with unexpected argument", Nix reports the first unexpected
@@ -29,15 +33,18 @@
 //! - `letrec` groups form reference cycles that are never freed: fine for a
 //!   single evaluation; the compiled runtime will need a garbage collector.
 
+mod nix_eval;
+mod program;
+
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use ir::ast_to_hir::{LowerOptions, lower_root_with};
 use ir::builtins_dialect::RefOp;
-use ir::diagnostics::{ErrorKind, ParseErrors, SourceError, SourceFile, span_of};
+use ir::diagnostics::{ParseErrors, SourceError, position_of, source_name_of, span_of};
 use ir::hir::{BinOp, InterpKind, Literal, UnOp};
-use ir::hir_to_mir::lower_module;
 use ir::mir;
+pub use nix_eval::{AutoArg, EvalCommand, Installable, OutputFormat, nix_eval, suggestions};
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::SingleBlockRegionInterface;
 use pliron::builtin::ops::{FuncOp, ModuleOp};
@@ -46,8 +53,8 @@ use pliron::linked_list::ContainsLinkedList;
 use pliron::location::Located;
 use pliron::operation::Operation;
 use pliron::value::Value as MirValue;
-use runtime::print::print_strict;
-use runtime::{Builtins, Data, Error, Result, Value, ops};
+pub use program::{Program, Session, SourceId};
+use runtime::{Builtins, Data, Error, Formals, LambdaInfo, Origin, Result, Value, ops};
 
 /// Why a file could not be evaluated.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -58,57 +65,45 @@ pub enum EvalError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Source(#[from] SourceError),
-}
-
-/// Parses, lowers and evaluates `file`, and prints the result like
-/// `nix-instantiate --eval --strict`.
-///
-/// Nix calls may nest [`runtime::ops::MAX_CALL_DEPTH`] deep, and the
-/// interpreter recurses with them: run this on a thread with a large stack
-/// (the driver uses 256 MiB).
-pub fn evaluate(
-    mut ctx: Context,
-    file: &SourceFile,
-    options: &LowerOptions,
-) -> std::result::Result<String, EvalError> {
-    let parse = ir::stack::parse(file.text());
-    file.check_parse(parse.errors())?;
-    let module = lower_root_with(&mut ctx, file, &parse.tree(), options)?;
-    lower_module(&mut ctx, module).map_err(|e| {
-        let span = span_of(&e.loc).map(|s| s.offset()..s.offset() + s.len());
-        file.error_at(ErrorKind::Verify(e.err.to_string()), span)
-    })?;
-    let to_source_error = |e: Error| file.error_at(ErrorKind::Eval(e.message), e.span);
-    let value = eval_module(Rc::new(ctx), module).map_err(to_source_error)?;
-    Ok(print_strict(&value).map_err(to_source_error)?)
-}
-
-/// Evaluates `@main` of the MIR module `module` to weak head normal form.
-pub fn eval_module(ctx: Rc<Context>, module: ModuleOp) -> Result<Value> {
-    let main = module
-        .get_body(&ctx, 0)
-        .deref(&ctx)
-        .iter(&ctx)
-        .find_map(|op| Operation::get_op::<FuncOp>(op, &ctx))
-        .expect("MIR modules contain @main");
-    let entry = main.get_entry_block(&ctx);
-    let interp = Rc::new(Interp {
-        ctx,
-        builtins: Builtins::new(),
-    });
-    let value = interp.run_block(entry, &mut HashMap::new())?;
-    value.force()?;
-    Ok(value)
+    /// An error that is not about a place in a source.
+    #[error("{0}")]
+    Message(String),
 }
 
 struct Interp {
     ctx: Rc<Context>,
     builtins: Builtins,
+    /// What runtime lambdas know about each `nix_mir.lambda`, computed the
+    /// first time it creates one.
+    lambdas: RefCell<HashMap<Ptr<Operation>, Rc<LambdaInfo>>>,
 }
 
 type Env = HashMap<MirValue, Value>;
 
 impl Interp {
+    fn new(ctx: Rc<Context>, builtins: Builtins) -> Self {
+        Interp {
+            ctx,
+            builtins,
+            lambdas: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Evaluates `@main` of the MIR module `module` to weak head normal form.
+    fn run_main(self: &Rc<Self>, module: ModuleOp) -> Result<Value> {
+        let ctx = &self.ctx;
+        let main = module
+            .get_body(ctx, 0)
+            .deref(ctx)
+            .iter(ctx)
+            .find_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+            .expect("MIR modules contain @main");
+        let entry = main.get_entry_block(ctx);
+        let value = self.run_block(entry, &mut HashMap::new())?;
+        value.force()?;
+        Ok(value)
+    }
+
     /// Runs the ops of `block` and returns the value it yields.
     fn run_block(self: &Rc<Self>, block: Ptr<BasicBlock>, env: &mut Env) -> Result<Value> {
         runtime::stack::check()?;
@@ -117,8 +112,9 @@ impl Interp {
             if Operation::get_op::<mir::YieldOp>(op, ctx).is_some() {
                 return Ok(env[&op.deref(ctx).get_operand(0)].clone());
             }
-            let span = span_of(&op.deref(ctx).loc()).map(|s| s.offset()..s.offset() + s.len());
-            let result = self.run_op(op, env).map_err(|e| e.at(span))?;
+            let result = self
+                .run_op(op, env)
+                .map_err(|e| e.at(|| origin_of(ctx, op)))?;
             if let Some(value) = result {
                 let mir_value = op.deref(ctx).get_result(0);
                 env.insert(mir_value, value);
@@ -245,14 +241,39 @@ impl Interp {
 
     #[inline(never)]
     fn run_lambda(self: &Rc<Self>, op: Ptr<Operation>, env: &Env) -> Value {
-        let lambda = Operation::get_op::<mir::LambdaOp>(op, &self.ctx).expect("a lambda");
+        let info = self.lambda_info(op);
         let (this, captures) = (self.clone(), operands(&self.ctx, op, env));
-        Value::lambda(lambda.name(&self.ctx).map(Rc::from), move |arg| {
+        Value::lambda(info, move |arg| {
             let args = std::iter::once(arg)
                 .chain(captures.iter().cloned())
                 .collect();
             this.run_region(op, 0, args)
         })
+    }
+
+    /// What runtime lambdas created by the `nix_mir.lambda` `op` know.
+    fn lambda_info(&self, op: Ptr<Operation>) -> Rc<LambdaInfo> {
+        let ctx = &self.ctx;
+        let mut lambdas = self.lambdas.borrow_mut();
+        let info = lambdas.entry(op).or_insert_with(|| {
+            let lambda = Operation::get_op::<mir::LambdaOp>(op, ctx).expect("a lambda");
+            let formals = lambda.formals(ctx).map(|spec| Formals {
+                names: spec
+                    .formals
+                    .iter()
+                    .map(|(name, has_default)| (Rc::from(name.as_str()), *has_default))
+                    .collect(),
+                ellipsis: spec.ellipsis,
+            });
+            Rc::new(LambdaInfo {
+                name: lambda.name(ctx).map(Rc::from),
+                pos: position_of(ctx, &op.deref(ctx).loc())
+                    .expect("lambdas are located")
+                    .into(),
+                formals,
+            })
+        });
+        Rc::clone(info)
     }
 
     #[inline(never)]
@@ -266,6 +287,16 @@ impl Interp {
         };
         self.run_block(branch, env)
     }
+}
+
+/// Where `op` is in its source.
+fn origin_of(ctx: &Context, op: Ptr<Operation>) -> Option<Origin> {
+    let loc = op.deref(ctx).loc();
+    let span = span_of(&loc)?;
+    Some(Origin {
+        source: source_name_of(ctx, &loc)?.into(),
+        span: span.offset()..span.offset() + span.len(),
+    })
 }
 
 fn operand(ctx: &Context, op: Ptr<Operation>, env: &Env, i: usize) -> Value {

@@ -467,10 +467,12 @@ impl Lowerer<'_> {
             }
             Expr::BinOp(bin) => self.lower_binop(block, bin),
             Expr::CurPos(pos) => {
+                let Some(file) = self.file.cur_pos_file().map(str::to_string) else {
+                    return Ok(self.emit_const(block, Literal::Null));
+                };
                 let (line, column) = self.file.line_col(pos.syntax().text_range().start());
                 let as_int =
                     |n: usize| Literal::Int(i64::try_from(n).expect("source positions fit in i64"));
-                let file = self.file.abs_path().to_string();
                 let set = AttrSetOp::new(self.ctx);
                 self.append(block, &set);
                 let inner = add_region_block(self.ctx, set.get_operation(), 0);

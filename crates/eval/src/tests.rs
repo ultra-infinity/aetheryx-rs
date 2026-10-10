@@ -1,9 +1,15 @@
-//! Tests of the interpreter. Expected results are what Nix 2.28 produces.
+//! Tests of the interpreter. Expected results are what `nix eval` (Nix 2.28)
+//! produces.
+
+use std::path::Path;
+
+use ir::ast_to_hir::LowerOptions;
+use runtime::print::print_value;
 
 use super::*;
 
-/// Evaluates `src` as `/work/test.nix` and prints the result, on a thread
-/// with a stack as large as the driver's.
+/// Evaluates `src` as `/work/test.nix` and prints the result like `nix
+/// eval`, on a thread with a stack as large as the driver's.
 fn eval(src: &str) -> std::result::Result<String, String> {
     let src = src.to_string();
     std::thread::Builder::new()
@@ -15,12 +21,22 @@ fn eval(src: &str) -> std::result::Result<String, String> {
 }
 
 fn eval_here(src: &str) -> std::result::Result<String, String> {
-    let ctx = Context::new();
-    let file = SourceFile::with_cwd(&ctx, "test.nix", src, std::path::Path::new("/work")).unwrap();
     let options = LowerOptions {
         home_dir: Some("/home/u".to_string()),
     };
-    evaluate(ctx, &file, &options).map_err(|e| e.to_string())
+    eval_file(src, Path::new("/work"), options).map_err(|e| e.to_string())
+}
+
+/// Evaluates `src` as `cwd/test.nix` and prints the result like `nix eval`.
+fn eval_file(
+    src: &str,
+    cwd: &Path,
+    options: LowerOptions,
+) -> std::result::Result<String, EvalError> {
+    let mut program = Program::new(options);
+    let id = program.add_file("test.nix", src, cwd)?;
+    let session = program.start();
+    print_value(&session.value(id)).map_err(|e| session.error(e))
 }
 
 fn ok(src: &str) -> String {
@@ -87,10 +103,8 @@ fn errors_match_nix() {
 
 #[test]
 fn errors_point_at_the_failing_expression() {
-    let ctx = Context::new();
     let src = "let x = 1; in x + \"a\"";
-    let file = SourceFile::with_cwd(&ctx, "t.nix", src, std::path::Path::new("/w")).unwrap();
-    let Err(EvalError::Source(e)) = evaluate(ctx, &file, &LowerOptions::default()) else {
+    let Err(EvalError::Source(e)) = eval_file(src, Path::new("/w"), LowerOptions::default()) else {
         panic!("expected an evaluation error");
     };
     assert_eq!(e.span().map(|s| (s.offset(), s.len())), Some((14, 7)));

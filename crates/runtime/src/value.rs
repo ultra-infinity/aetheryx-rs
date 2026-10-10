@@ -48,10 +48,28 @@ pub type Attrs = BTreeMap<Rc<str>, Value>;
 
 /// A closure.
 pub struct Lambda {
-    /// The name Nix reports in errors: the attribute or `let` binding the
-    /// lambda was defined in, if any.
-    pub name: Option<Rc<str>>,
+    pub info: Rc<LambdaInfo>,
     pub body: Box<dyn Fn(Value) -> Result<Value>>,
+}
+
+/// What Nix knows about a lambda besides its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaInfo {
+    /// The name Nix reports: the attribute or `let` binding the lambda was
+    /// defined in, if any.
+    pub name: Option<Rc<str>>,
+    /// Where it is defined, as Nix prints positions: `/abs/file.nix:1:5`.
+    pub pos: Rc<str>,
+    /// Its `{ a, b ? x, ... }` pattern, if it has one.
+    pub formals: Option<Formals>,
+}
+
+/// A lambda's `{ a, b ? x, ... }` pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Formals {
+    /// `(name, has_default)`, in declaration order.
+    pub names: Vec<(Rc<str>, bool)>,
+    pub ellipsis: bool,
 }
 
 /// The implementation of a primop, called with all its arguments.
@@ -125,9 +143,9 @@ impl Value {
         Self::ready(Data::Attrs(Rc::new(attrs)))
     }
 
-    pub fn lambda(name: Option<Rc<str>>, body: impl Fn(Value) -> Result<Value> + 'static) -> Self {
+    pub fn lambda(info: Rc<LambdaInfo>, body: impl Fn(Value) -> Result<Value> + 'static) -> Self {
         Self::ready(Data::Lambda(Rc::new(Lambda {
-            name,
+            info,
             body: Box::new(body),
         })))
     }

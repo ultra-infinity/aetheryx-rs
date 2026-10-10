@@ -46,7 +46,7 @@ use pliron::r#type::{TypeHandle, type_cast, type_impls};
 use pliron::value::Value;
 
 use super::scopes::Scopes;
-use super::{Lowered, ToMIRDialect, ToMIRType, is_hir_type, region_block};
+use super::{ToMIRDialect, ToMIRType, is_hir_type, region_block};
 use crate::hir;
 use crate::mir::{self, Ty};
 
@@ -121,13 +121,7 @@ impl DialectConversion for HirToMirConversion {
         let op_dyn = Operation::get_op_dyn(op, ctx);
         let to_mir =
             op_cast::<dyn ToMIRDialect>(op_dyn.op_ref()).expect("checked by can_convert_op");
-        let mut b = Builder::new(ctx, rewriter, op);
-        match to_mir.to_mir(&mut b, &mut self.state)? {
-            Lowered::Value(thunk) => rewriter.replace_operation_with_values(ctx, op, vec![thunk]),
-            Lowered::Erased => rewriter.erase_operation(ctx, op),
-            Lowered::InPlace => {}
-        }
-        Ok(())
+        to_mir.rewrite(&mut Builder::new(ctx, rewriter, op), &mut self.state)
     }
 }
 
@@ -208,12 +202,23 @@ impl<'a> Builder<'a> {
 
     /// The error for an op that the op containing it converts (a binding, or
     /// a name), reached on its own.
-    pub fn converted_with_parent(&self) -> Result<Lowered> {
+    pub fn converted_with_parent(&self) -> Result<()> {
         input_err!(
             self.loc.clone(),
             "{} is converted with the op that contains it",
             Operation::get_opid(self.op, self.ctx)
         )
+    }
+
+    /// Replaces the HIR op's result with `thunk`, and erases the op.
+    pub fn replace(&mut self, thunk: Value) {
+        self.rewriter
+            .replace_operation_with_values(self.ctx, self.op, vec![thunk]);
+    }
+
+    /// Erases the HIR op, which has no result.
+    pub fn erase(&mut self) {
+        self.rewriter.erase_operation(self.ctx, self.op);
     }
 
     /// Inserts `op` at the insertion point; the insertion point stays after it.
@@ -239,7 +244,7 @@ impl<'a> Builder<'a> {
         self.value(evaluated)
     }
 
-    pub fn yield_(&mut self, value: Value) {
+    pub fn r#yield(&mut self, value: Value) {
         let ret = mir::YieldOp::new(self.ctx, value);
         self.insert(&ret);
     }
@@ -267,7 +272,7 @@ impl<'a> Builder<'a> {
     pub fn thunk_of(&mut self, f: impl FnOnce(&mut Self) -> Value) -> Value {
         self.thunk(|b| {
             let value = f(b);
-            b.yield_(value);
+            b.r#yield(value);
         })
     }
 

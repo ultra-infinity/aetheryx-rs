@@ -48,7 +48,6 @@ use pliron::operation::Operation;
 use pliron::pass::{AnalysisManager, Pass, Passes};
 use pliron::result::Result;
 use pliron::r#type::{Type, TypeHandle};
-use pliron::value::Value;
 
 use crate::hir;
 use convert::{Builder, ConversionState};
@@ -58,16 +57,19 @@ use convert::{Builder, ConversionState};
 /// implements it, and so do `nix_builtins.ref` (shared by both IRs) and
 /// `builtin.func` (whose signature changes).
 ///
-/// Unlike `ToLLVMDialect::rewrite`, an implementation only builds the MIR
-/// for its op and says what replaces the op; the conversion replaces or
-/// erases it. It also gets the [`ConversionState`]: converting a name needs
-/// the scope it is resolved in, which an op cannot see once the ops around
-/// it are converted.
+/// Like `ToLLVMDialect::rewrite`, an implementation rewrites its op
+/// completely: it builds the MIR, then replaces the op ([`Builder::replace`]),
+/// erases it ([`Builder::erase`]) or changes it in place. An op that is
+/// neither replaced nor erased stays in the IR, and if it is still HIR,
+/// [`CheckMir`] reports it as left over. Unlike `ToLLVMDialect::rewrite`, it
+/// also gets the [`ConversionState`]: converting a name needs the scope it
+/// is resolved in, which an op cannot see once the ops around it are
+/// converted.
 #[op_interface]
 pub(crate) trait ToMIRDialect {
-    /// Builds the MIR for `self` with `b`, whose insertion point is before
+    /// Rewrites `self` to `nix_mir` with `b`, whose insertion point is before
     /// `self`. The definitions of `self`'s operands are already converted.
-    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered>;
+    fn rewrite(&self, b: &mut Builder, state: &mut ConversionState) -> Result<()>;
 
     fn verify(_op: &dyn Op, _ctx: &Context) -> Result<()>
     where
@@ -75,16 +77,6 @@ pub(crate) trait ToMIRDialect {
     {
         Ok(())
     }
-}
-
-/// What replaces an op converted by [`ToMIRDialect`].
-pub(crate) enum Lowered {
-    /// The thunk that replaces its result.
-    Value(Value),
-    /// Nothing: the op has no result.
-    Erased,
-    /// The op itself, changed in place or left as it is.
-    InPlace,
 }
 
 /// Interface for converting a type to `nix_mir`, used by [`HirToMir`].

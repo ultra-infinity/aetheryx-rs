@@ -19,44 +19,48 @@ use pliron::value::Value;
 
 use super::convert::{Builder, ConversionState};
 use super::scopes::{Scopes, bind_name};
-use super::{Lowered, ToMIRDialect, region_block};
+use super::{ToMIRDialect, region_block};
 use crate::hir::{self, BinOp};
 use crate::mir;
 
 /// `let ... in body`: a thunk computing the group, then the body.
 #[op_interface_impl]
 impl ToMIRDialect for hir::LetInOp {
-    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, state: &mut ConversionState) -> Result<()> {
         let (bindings, body) = (b.region(0), b.region(1));
         let op = self.get_operation();
-        Ok(Lowered::Value(b.thunk(|b| {
+        let thunk = b.thunk(|b| {
             let group = Recursive::build(b, bindings);
             b.move_ops(body);
             group.resolve(b, &state.scopes, op);
-        })))
+        });
+        b.replace(thunk);
+        Ok(())
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::AttrSetOp {
-    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, state: &mut ConversionState) -> Result<()> {
         let set = attr_set(b, &state.scopes, self.get_operation(), false);
-        Ok(Lowered::Value(set))
+        b.replace(set);
+        Ok(())
     }
 }
 
 #[op_interface_impl]
 impl ToMIRDialect for hir::RecAttrSetOp {
-    fn to_mir(&self, b: &mut Builder, state: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, state: &mut ConversionState) -> Result<()> {
         let set = attr_set(b, &state.scopes, self.get_operation(), true);
-        Ok(Lowered::Value(set))
+        b.replace(set);
+        Ok(())
     }
 }
 
 /// Converted with its set or `let`.
 #[op_interface_impl]
 impl ToMIRDialect for hir::BindOp {
-    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, _: &mut ConversionState) -> Result<()> {
         b.converted_with_parent()
     }
 }
@@ -64,7 +68,7 @@ impl ToMIRDialect for hir::BindOp {
 /// Converted with its set.
 #[op_interface_impl]
 impl ToMIRDialect for hir::DynBindOp {
-    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, _: &mut ConversionState) -> Result<()> {
         b.converted_with_parent()
     }
 }
@@ -73,7 +77,7 @@ impl ToMIRDialect for hir::DynBindOp {
 /// member of the group.
 #[op_interface_impl]
 impl ToMIRDialect for hir::VarOp {
-    fn to_mir(&self, b: &mut Builder, _: &mut ConversionState) -> Result<Lowered> {
+    fn rewrite(&self, b: &mut Builder, _: &mut ConversionState) -> Result<()> {
         b.converted_with_parent()
     }
 }

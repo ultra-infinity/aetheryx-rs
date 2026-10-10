@@ -54,6 +54,18 @@ impl Program {
         self.add(file)
     }
 
+    /// Compiles an expression read from standard input, whose relative paths
+    /// resolve against `cwd`.
+    pub fn add_stdin(
+        &mut self,
+        text: impl Into<String>,
+        cwd: &Path,
+    ) -> Result<SourceId, EvalError> {
+        let file = SourceFile::stdin(&self.ctx, text, cwd)
+            .map_err(|e| EvalError::Message(e.to_string()))?;
+        self.add(file)
+    }
+
     fn add(&mut self, file: SourceFile) -> Result<SourceId, EvalError> {
         let parse = ir::stack::parse(file.text());
         file.check_parse(parse.errors())?;
@@ -69,7 +81,10 @@ impl Program {
     /// Ends compilation; the sources can now be evaluated.
     pub fn start(self) -> Session {
         Session {
-            interp: Rc::new(Interp::new(Rc::new(self.ctx), Builtins::new())),
+            interp: Rc::new(Interp::new(
+                Rc::new(self.ctx),
+                Builtins::new(self.options.pure_eval),
+            )),
             sources: Rc::new(self.sources),
         }
     }

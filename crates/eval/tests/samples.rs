@@ -28,6 +28,8 @@ fn evaluate_sample(name: &str) -> Result<String, String> {
     let path = format!("samples/valid/{name}.nix");
     let options = LowerOptions {
         home_dir: Some(HOME.to_string()),
+        // Like `nix eval --file`.
+        pure_eval: false,
     };
     let mut program = Program::new(options);
     let id = program

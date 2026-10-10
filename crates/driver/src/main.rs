@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use eval::{AutoArg, EvalCommand, Installable, OutputFormat};
 use ir::ast_to_hir::{LowerOptions, lower_root};
 use ir::diagnostics::{ErrorKind, SourceFile, span_of};
@@ -22,10 +22,13 @@ use pliron::op::Op;
 use pliron::printable::Printable;
 use rnix::{NodeOrToken, Parse, Root, SyntaxNode, SyntaxToken};
 
+mod settings;
+
 #[derive(Parser)]
 #[command(
     name = "aetheryx",
     version,
+    disable_help_subcommand = true,
     about = "A Nix evaluator, as a drop-in replacement for the `nix` command"
 )]
 struct Cli {
@@ -60,15 +63,16 @@ struct GlobalOptions {
     /// Consider all previously downloaded files out-of-date.
     #[arg(long, global = true)]
     refresh: bool,
-    /// Set the Nix configuration setting NAME to VALUE.
-    #[arg(long = "option", global = true, num_args = 2, value_names = ["NAME", "VALUE"])]
+    /// Set the Nix configuration setting NAME to VALUE. Settings can also be
+    /// given as flags (`--NAME VALUE`, `--NAME` / `--no-NAME`).
+    #[arg(
+        long = "option",
+        global = true,
+        num_args = 2,
+        value_names = ["NAME", "VALUE"],
+        allow_hyphen_values = true
+    )]
     option: Vec<String>,
-    /// Experimental features to enable (all of aetheryx's features are).
-    #[arg(long, global = true, value_name = "FEATURES")]
-    experimental_features: Option<String>,
-    /// Experimental features to enable in addition to the configured ones.
-    #[arg(long, global = true, value_name = "FEATURES")]
-    extra_experimental_features: Option<String>,
 }
 
 /// Declares the `nix` commands aetheryx does not support yet: each takes
@@ -90,6 +94,9 @@ macro_rules! unsupported_commands {
                     args: Vec<String>,
                 },
             )*
+            /// Any other command: a deprecated alias, or not a command.
+            #[command(external_subcommand)]
+            Other(Vec<String>),
         }
 
         impl Command {
@@ -97,14 +104,50 @@ macro_rules! unsupported_commands {
             fn unsupported(&self) -> Option<&'static str> {
                 match self {
                     $(Command::$variant { .. } => Some($name),)*
-                    Command::Eval(_) | Command::Debug(_) => None,
+                    Command::Eval(_) | Command::Debug(_) | Command::Other(_) => None,
                 }
             }
         }
+
+        /// The commands `nix` suggests for a mistyped one.
+        const NIX_COMMANDS: &[&str] = &["eval", $($name,)*];
     };
 }
 
+/// `nix`'s deprecated aliases, and what they stand for.
+const DEPRECATED_ALIASES: [(&str, &str); 22] = [
+    ("add-to-store", "store add-path"),
+    ("cat-nar", "nar cat"),
+    ("cat-store", "store cat"),
+    ("copy-sigs", "store copy-sigs"),
+    ("dev-shell", "develop"),
+    ("diff-closures", "store diff-closures"),
+    ("doctor", "config check"),
+    ("dump-path", "store dump-path"),
+    ("hash-file", "hash file"),
+    ("hash-path", "hash path"),
+    ("ls-nar", "nar ls"),
+    ("ls-store", "store ls"),
+    ("make-content-addressable", "store make-content-addressed"),
+    ("optimise-store", "store optimise"),
+    ("ping-store", "store info"),
+    ("show-config", "config show"),
+    ("show-derivation", "derivation show"),
+    ("sign-paths", "store sign"),
+    ("to-base16", "hash to-base16"),
+    ("to-base32", "hash to-base32"),
+    ("to-base64", "hash to-base64"),
+    ("verify", "store verify"),
+];
+
 unsupported_commands! {
+    /// Show help about `nix` or a particular subcommand (not supported yet).
+    Help => "help",
+    /// Show help about store types and their settings (not supported yet).
+    HelpStores => "help-stores",
+    /// Run a shell in which the specified packages are available (not
+    /// supported yet).
+    Shell => "shell",
     /// Build a derivation or fetch a store path (not supported yet).
     Build => "build",
     /// Run a bash shell that provides the build environment of a derivation
@@ -180,10 +223,10 @@ struct EvalArgs {
     file: Option<PathBuf>,
     /// Interpret the installable as an attribute path relative to the Nix
     /// expression EXPR.
-    #[arg(long, value_name = "EXPR")]
+    #[arg(long, value_name = "EXPR", allow_hyphen_values = true)]
     expr: Option<String>,
     /// Apply the function EXPR to each argument.
-    #[arg(long, value_name = "EXPR")]
+    #[arg(long, value_name = "EXPR", allow_hyphen_values = true)]
     apply: Option<String>,
     /// Produce output in JSON format.
     #[arg(long)]
@@ -192,13 +235,13 @@ struct EvalArgs {
     #[arg(long)]
     raw: bool,
     /// Pass the value EXPR as the argument NAME to Nix functions.
-    #[arg(long, num_args = 2, value_names = ["NAME", "EXPR"])]
+    #[arg(long, num_args = 2, value_names = ["NAME", "EXPR"], allow_hyphen_values = true)]
     arg: Vec<String>,
     /// Pass the string STRING as the argument NAME to Nix functions.
-    #[arg(long, num_args = 2, value_names = ["NAME", "STRING"])]
+    #[arg(long, num_args = 2, value_names = ["NAME", "STRING"], allow_hyphen_values = true)]
     argstr: Vec<String>,
     /// Pass the contents of file PATH as the argument NAME to Nix functions.
-    #[arg(long, num_args = 2, value_names = ["NAME", "PATH"])]
+    #[arg(long, num_args = 2, value_names = ["NAME", "PATH"], allow_hyphen_values = true)]
     arg_from_file: Vec<String>,
     /// Pass the contents of stdin as the argument NAME to Nix functions.
     #[arg(long, value_name = "NAME")]
@@ -282,37 +325,6 @@ enum DebugCommand {
 /// The interpreter recurses as deeply as the Nix program does.
 const STACK_SIZE: usize = 256 * 1024 * 1024;
 
-/// The `nix` commands, for suggestions on a mistyped one.
-const NIX_COMMANDS: [&str; 27] = [
-    "build",
-    "bundle",
-    "config",
-    "copy",
-    "daemon",
-    "derivation",
-    "develop",
-    "edit",
-    "env",
-    "eval",
-    "flake",
-    "fmt",
-    "hash",
-    "key",
-    "log",
-    "nar",
-    "path-info",
-    "print-dev-env",
-    "profile",
-    "realisation",
-    "registry",
-    "repl",
-    "run",
-    "search",
-    "store",
-    "upgrade-nix",
-    "why-depends",
-];
-
 /// Why a command failed.
 enum Failure {
     /// The command line is wrong.
@@ -327,17 +339,32 @@ impl<E: Into<miette::Report>> From<E> for Failure {
 }
 
 fn main() -> ExitCode {
+    // Like `nix`, exit quietly when the reader of the output goes away,
+    // instead of failing to write to the closed pipe.
+    // SAFETY: restoring the default action of SIGPIPE has no preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     // Messages are printed as they are, as Nix does, not wrapped.
     let _ = miette::set_hook(Box::new(|_| {
         Box::new(miette::MietteHandlerOpts::new().wrap_lines(false).build())
     }));
-    let cli = match Cli::try_parse() {
+    let args = settings::expand_flags(std::env::args_os());
+    let matches = match Cli::command().try_get_matches_from(args) {
+        Ok(matches) => matches,
+        Err(error) => return command_line_error(error),
+    };
+    let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => return command_line_error(error),
     };
+    let auto_arg_order = matches
+        .subcommand_matches("eval")
+        .map(auto_arg_order)
+        .unwrap_or_default();
     let result = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
-        .spawn(move || run(cli))
+        .spawn(move || run(cli, auto_arg_order))
         .expect("the evaluation thread can be started")
         .join()
         .expect("the evaluation thread panicked");
@@ -362,67 +389,144 @@ fn usage_error(message: &str) -> ExitCode {
 /// has one. Like `nix`, usage errors exit with 1; help and version with 0.
 fn command_line_error(error: clap::Error) -> ExitCode {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
-    let context = |kind| match error.get(kind) {
-        Some(ContextValue::String(s)) => Some(s.clone()),
+    let invalid_arg = match error.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(arg)) => Some(arg.clone()),
         _ => None,
     };
-    match error.kind() {
-        ErrorKind::UnknownArgument => match context(ContextKind::InvalidArg) {
-            Some(flag) => usage_error(&format!("unrecognised flag '{flag}'")),
-            None => print_clap_error(&error),
-        },
-        ErrorKind::InvalidSubcommand => match context(ContextKind::InvalidSubcommand) {
-            Some(name) => {
-                let mut message = format!("'{name}' is not a recognised command");
-                let suggestions = eval::suggestions(NIX_COMMANDS.into_iter(), &name);
-                if !suggestions.is_empty() {
-                    message.push_str(&format!("\n       Did you mean {suggestions}?"));
-                }
-                usage_error(&message)
+    match (error.kind(), invalid_arg) {
+        (ErrorKind::UnknownArgument, Some(arg)) if arg.starts_with('-') => {
+            usage_error(&format!("unrecognised flag '{arg}'"))
+        }
+        (ErrorKind::UnknownArgument, Some(arg)) => {
+            usage_error(&format!("unexpected argument '{arg}'"))
+        }
+        (
+            ErrorKind::InvalidValue
+            | ErrorKind::WrongNumberOfValues
+            | ErrorKind::TooFewValues
+            | ErrorKind::NoEquals,
+            Some(arg),
+        ) => {
+            // `arg` is the flag and its value names: `--arg <NAME> <EXPR>`.
+            let flag = arg.split_whitespace().next().unwrap_or_default();
+            let required = arg.matches('<').count();
+            let given = match error.get(ContextKind::ActualNumValues) {
+                Some(ContextValue::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            usage_error(&format!(
+                "flag '{flag}' requires {required} argument(s), but only {given} were given"
+            ))
+        }
+        (ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand, _) => {
+            usage_error("no subcommand specified")
+        }
+        _ => {
+            let _ = error.print();
+            if error.use_stderr() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
             }
-            None => print_clap_error(&error),
-        },
-        _ => print_clap_error(&error),
+        }
     }
 }
 
-fn print_clap_error(error: &clap::Error) -> ExitCode {
-    let _ = error.print();
-    if error.use_stderr() {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+/// Where each `--arg`, `--argstr`, `--arg-from-file` and `--arg-from-stdin`
+/// is on the command line, in order: later ones replace earlier ones with the
+/// same name, whatever their kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoArgFlag {
+    /// The nth `--arg`.
+    Arg(usize),
+    Argstr(usize),
+    ArgFromFile(usize),
+    ArgFromStdin,
 }
 
-fn run(cli: Cli) -> std::result::Result<(), Failure> {
-    check_global_options(&cli.global)?;
+fn auto_arg_order(eval: &clap::ArgMatches) -> Vec<AutoArgFlag> {
+    // The index of the first value of each occurrence of the flag `id`.
+    let positions = |id: &str, values_per_flag: usize| -> Vec<usize> {
+        eval.indices_of(id)
+            .map(|indices| indices.step_by(values_per_flag).collect())
+            .unwrap_or_default()
+    };
+    let mut order: Vec<(usize, AutoArgFlag)> = Vec::new();
+    for (id, values_per_flag, flag) in [
+        ("arg", 2, AutoArgFlag::Arg as fn(usize) -> AutoArgFlag),
+        ("argstr", 2, AutoArgFlag::Argstr),
+        ("arg_from_file", 2, AutoArgFlag::ArgFromFile),
+        ("arg_from_stdin", 1, |_| AutoArgFlag::ArgFromStdin),
+    ] {
+        for (n, position) in positions(id, values_per_flag).into_iter().enumerate() {
+            order.push((position, flag(n)));
+        }
+    }
+    order.sort_by_key(|&(position, _)| position);
+    order.into_iter().map(|(_, flag)| flag).collect()
+}
+
+fn run(cli: Cli, auto_arg_order: Vec<AutoArgFlag>) -> std::result::Result<(), Failure> {
+    check_settings(&cli.global)?;
     if let Some(name) = cli.command.unsupported() {
         return Err(miette!("'nix {name}' is not supported by aetheryx yet").into());
     }
     match cli.command {
-        Command::Eval(args) => eval_command(args),
+        Command::Eval(args) => eval_command(*args, &auto_arg_order),
         Command::Debug(command) => Ok(debug_command(command)?),
+        Command::Other(args) => other_command(&args[0]),
         _ => unreachable!("unsupported commands are handled above"),
     }
 }
 
-/// Fails on a global option that would change the result.
-fn check_global_options(global: &GlobalOptions) -> Result<()> {
-    for setting in global.option.chunks(2).map(|pair| pair[0].as_str()) {
-        if !matches!(
-            setting,
-            "experimental-features" | "extra-experimental-features"
-        ) {
-            return Err(miette!(
-                "the setting '{setting}' is not supported by aetheryx yet"
-            ));
+/// A command that is not one of `nix`'s main commands.
+fn other_command(name: &str) -> std::result::Result<(), Failure> {
+    if let Some((_, target)) = DEPRECATED_ALIASES.iter().find(|(alias, _)| *alias == name) {
+        eprintln!("warning: '{name}' is a deprecated alias for '{target}'");
+        return Err(miette!("'nix {name}' is not supported by aetheryx yet").into());
+    }
+    let mut message = format!("'{name}' is not a recognised command");
+    // `nix` does not suggest the `shell` shorthand.
+    let commands = NIX_COMMANDS.iter().copied().filter(|c| *c != "shell");
+    let suggestions = eval::suggestions(commands, name);
+    if !suggestions.is_empty() {
+        message.push_str(&format!("\n       Did you mean {suggestions}?"));
+    }
+    Err(Failure::Usage(message))
+}
+
+/// Applies the `--option` settings: fails on one that would change the
+/// result, and warns about unknown ones as Nix does.
+fn check_settings(global: &GlobalOptions) -> Result<()> {
+    for name in global.option.chunks(2).map(|pair| pair[0].as_str()) {
+        match settings::verdict(name) {
+            settings::Verdict::Accepted => {}
+            settings::Verdict::Unknown => eprintln!("warning: unknown setting '{name}'"),
+            settings::Verdict::Unsupported => {
+                return Err(miette!(
+                    "the setting '{name}' is not supported by aetheryx yet"
+                ));
+            }
         }
     }
     Ok(())
 }
 
-fn eval_command(args: Box<EvalArgs>) -> std::result::Result<(), Failure> {
+/// The reason in an I/O error, as Nix prints it (without Rust's
+/// " (os error N)").
+fn io_reason(error: &std::io::Error) -> String {
+    let reason = error.to_string();
+    reason
+        .split(" (os error")
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn eval_command(
+    args: EvalArgs,
+    auto_arg_order: &[AutoArgFlag],
+) -> std::result::Result<(), Failure> {
     if args.file.is_some() && args.expr.is_some() {
         return Err(Failure::Usage("'--file' and '--expr' are exclusive".into()));
     }
@@ -444,8 +548,16 @@ fn eval_command(args: Box<EvalArgs>) -> std::result::Result<(), Failure> {
     if args.eval_store.is_some() {
         return unsupported("--eval-store");
     }
+    let read_stdin = || -> Result<String> {
+        let mut contents = String::new();
+        std::io::stdin()
+            .read_to_string(&mut contents)
+            .into_diagnostic()?;
+        Ok(contents)
+    };
     let attr_path = args.installable.clone().unwrap_or_default();
     let installable = match (args.file, args.expr) {
+        (Some(file), None) if file == Path::new("-") => Installable::Stdin(read_stdin()?),
         (Some(file), None) => Installable::File(file),
         (None, Some(expr)) => Installable::Expr(expr),
         (None, None) => {
@@ -459,24 +571,28 @@ fn eval_command(args: Box<EvalArgs>) -> std::result::Result<(), Failure> {
         (Some(_), Some(_)) => unreachable!("--file with --expr is rejected above"),
     };
     let mut auto_args = Vec::new();
-    for pair in args.arg.chunks(2) {
-        auto_args.push((pair[0].clone(), AutoArg::Expr(pair[1].clone())));
-    }
-    for pair in args.argstr.chunks(2) {
-        auto_args.push((pair[0].clone(), AutoArg::String(pair[1].clone())));
-    }
-    for pair in args.arg_from_file.chunks(2) {
-        let contents = fs::read_to_string(&pair[1])
-            .into_diagnostic()
-            .wrap_err_with(|| format!("reading file '{}'", pair[1]))?;
-        auto_args.push((pair[0].clone(), AutoArg::String(contents)));
-    }
-    if let Some(name) = args.arg_from_stdin {
-        let mut contents = String::new();
-        std::io::stdin()
-            .read_to_string(&mut contents)
-            .into_diagnostic()?;
-        auto_args.push((name, AutoArg::String(contents)));
+    for flag in auto_arg_order {
+        let pair = |values: &[String], n: usize| (values[2 * n].clone(), values[2 * n + 1].clone());
+        auto_args.push(match *flag {
+            AutoArgFlag::Arg(n) => {
+                let (name, expr) = pair(&args.arg, n);
+                (name, AutoArg::Expr(expr))
+            }
+            AutoArgFlag::Argstr(n) => {
+                let (name, string) = pair(&args.argstr, n);
+                (name, AutoArg::String(string))
+            }
+            AutoArgFlag::ArgFromFile(n) => {
+                let (name, path) = pair(&args.arg_from_file, n);
+                let contents = fs::read_to_string(&path)
+                    .map_err(|e| miette!("opening file '{path}': {}", io_reason(&e)))?;
+                (name, AutoArg::String(contents))
+            }
+            AutoArgFlag::ArgFromStdin => {
+                let name = args.arg_from_stdin.clone().expect("given");
+                (name, AutoArg::String(read_stdin()?))
+            }
+        });
     }
     let format = match (args.json, args.raw) {
         (true, _) => OutputFormat::Json,
@@ -489,6 +605,7 @@ fn eval_command(args: Box<EvalArgs>) -> std::result::Result<(), Failure> {
         apply: args.apply,
         auto_args,
         format,
+        impure: args.impure,
     };
     let cwd = std::env::current_dir().into_diagnostic()?;
     let output = eval::nix_eval(&command, &cwd, LowerOptions::from_env())?;

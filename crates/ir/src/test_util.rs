@@ -28,6 +28,7 @@ pub fn try_lower_hir(src: &str) -> (Context, Result<ModuleOp, SourceError>) {
     file.check_parse(parse.errors()).unwrap();
     let options = LowerOptions {
         home_dir: Some("/home/u".to_string()),
+        pure_eval: false,
     };
     let res = lower_root_with(&mut ctx, &file, &parse.tree(), &options);
     (ctx, res)

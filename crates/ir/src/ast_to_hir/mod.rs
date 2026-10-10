@@ -80,6 +80,9 @@ type Result<T> = std::result::Result<T, Diag>;
 pub struct LowerOptions {
     /// The directory `~/` path literals resolve against.
     pub home_dir: Option<String>,
+    /// Nix's `pure-eval`: the impure builtins (`currentSystem`,
+    /// `currentTime`) do not exist.
+    pub pure_eval: bool,
 }
 
 impl LowerOptions {
@@ -87,6 +90,7 @@ impl LowerOptions {
     pub fn from_env() -> Self {
         LowerOptions {
             home_dir: std::env::home_dir().and_then(|p| p.to_str().map(str::to_owned)),
+            pure_eval: false,
         }
     }
 }
@@ -278,7 +282,9 @@ impl Lowerer<'_> {
             }
             None => {}
         }
-        if let Some(builtin) = builtins::lookup_global(name) {
+        if let Some(builtin) = builtins::lookup_global(name)
+            && (builtin.in_pure_eval || !self.options.pure_eval)
+        {
             let lit = match builtin.name {
                 "true" => Some(Literal::Bool(true)),
                 "false" => Some(Literal::Bool(false)),

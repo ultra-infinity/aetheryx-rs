@@ -265,3 +265,198 @@ fn version_and_global_options() {
         "1\n"
     );
 }
+
+#[test]
+fn installables_like_nix() {
+    // A number that does not fit in 32 bits is an attribute name.
+    assert_eq!(
+        stdout(&["eval", "--expr", r#"{ "4294967296" = 1; }"#, "4294967296"]),
+        "1\n"
+    );
+    // An outputs specifier does not change what is evaluated.
+    assert_eq!(
+        stdout(&["eval", "--expr", "{ a = 1; }", "a^out,dev"]),
+        "1\n"
+    );
+    let (code, _, err) = run(&["eval", "--expr", "{ a = 1; }", "a^"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("invalid extended outputs specifier 'a^'"),
+        "{err}"
+    );
+    // Values may start with a dash.
+    assert_eq!(stdout(&["eval", "--expr", "-1"]), "-1\n");
+    // The last argument with a name wins, whatever its kind.
+    let expr = "{x}: { a = x; }";
+    assert_eq!(
+        stdout(&[
+            "eval", "--expr", expr, "a", "--argstr", "x", "1", "--arg", "x", "2"
+        ]),
+        "2\n"
+    );
+    assert_eq!(
+        stdout(&[
+            "eval", "--expr", expr, "a", "--arg", "x", "2", "--argstr", "x", "1"
+        ]),
+        "\"1\"\n"
+    );
+}
+
+#[test]
+fn standard_input() {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aetheryx"))
+        .args(["eval", "--file", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"x: x").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "«lambda @ «stdin»:1:1»\n"
+    );
+}
+
+#[test]
+fn pure_evaluation_of_expressions() {
+    // `--expr` is evaluated in pure mode, files are not.
+    assert_eq!(
+        stdout(&[
+            "eval",
+            "--expr",
+            "builtins.length (builtins.attrNames builtins)"
+        ]),
+        "116\n"
+    );
+    assert_eq!(
+        stdout(&["eval", "--impure", "--expr", "builtins ? currentSystem"]),
+        "true\n"
+    );
+    let dir = dir_with("pure", &[("cs.nix", "builtins ? currentSystem")]);
+    let (code, out, _) = run_in(&dir, &["eval", "-f", "cs.nix"]);
+    assert_eq!((code, out.as_str()), (0, "true\n"));
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(
+        stdout(&[
+            "eval",
+            "--expr",
+            "with builtins; [ nixPath nixVersion langVersion storeDir derivation ]"
+        ]),
+        "[ [ ] \"2.28.3\" 6 \"/nix/store\" «lambda @ <nix/derivation-internal.nix>:30:1» ]\n"
+    );
+    let (code, _, err) = run(&["eval", "--expr", "__currentTime"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("undefined variable '__currentTime'"), "{err}");
+}
+
+#[test]
+fn settings_like_nix() {
+    for args in [
+        &["eval", "--option", "cores", "2", "--expr", "1"][..],
+        &[
+            "eval",
+            "--show-trace",
+            "--max-jobs",
+            "2",
+            "--no-sandbox",
+            "--expr",
+            "1",
+        ][..],
+    ] {
+        let (code, out, err) = run(args);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (0, "1\n", ""),
+            "{args:?}"
+        );
+    }
+    let (code, out, err) = run(&["eval", "--option", "foo", "bar", "--expr", "1"]);
+    assert_eq!((code, out.as_str()), (0, "1\n"));
+    assert_eq!(err, "warning: unknown setting 'foo'\n");
+}
+
+#[test]
+fn more_usage_errors_are_reported_like_nix() {
+    for (args, message) in [
+        (
+            &["eval", "--expr", "1", "a", "b"][..],
+            "error: unexpected argument 'b'\n",
+        ),
+        (
+            &["eval", "--expr"][..],
+            "error: flag '--expr' requires 1 argument(s), but only 0 were given\n",
+        ),
+        (
+            &["eval", "--arg", "x"][..],
+            "error: flag '--arg' requires 2 argument(s), but only 1 were given\n",
+        ),
+        (&[][..], "error: no subcommand specified\n"),
+        (
+            &["shel"][..],
+            "error: 'shel' is not a recognised command\n       Did you mean help?\n",
+        ),
+    ] {
+        let (code, out, err) = run(args);
+        assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+        assert!(err.starts_with(message), "{args:?}: {err}");
+    }
+    let (code, _, err) = run(&["doctor"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.starts_with("warning: 'doctor' is a deprecated alias for 'config check'\n"),
+        "{err}"
+    );
+    assert!(
+        err.contains("'nix doctor' is not supported by aetheryx yet"),
+        "{err}"
+    );
+}
+
+/// Every sample in `samples/valid` evaluates with `aetheryx eval --file` to
+/// exactly what `nix eval --file` printed (`samples/expected`).
+#[test]
+fn samples_evaluate_like_nix_eval() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let home = "/home/u";
+    // Needs a search path (`-I`), which is not supported yet.
+    let unsupported = ["13-search-path"];
+    let mut names: Vec<String> = std::fs::read_dir(root.join("samples/valid"))
+        .unwrap()
+        .map(|e| {
+            e.unwrap()
+                .path()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    let mut compared = 0;
+    for name in names.iter().filter(|n| !unsupported.contains(&n.as_str())) {
+        let file = format!("samples/valid/{name}.nix");
+        let output = Command::new(env!("CARGO_BIN_EXE_aetheryx"))
+            .args(["eval", "--file", &file])
+            .current_dir(&root)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        let expected = std::fs::read_to_string(root.join(format!("samples/expected/{name}.out")))
+            .unwrap()
+            .replace("@ROOT@", root.to_str().unwrap())
+            .replace("@HOME@", home);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            expected,
+            "{name}"
+        );
+        assert!(output.status.success(), "{name}");
+        compared += 1;
+    }
+    assert_eq!(compared, names.len() - unsupported.len());
+}

@@ -14,26 +14,30 @@ use crate::ops::{
     self, Coercion, call, coerce_to_string, expect_attrs, expect_bool, expect_function, expect_int,
     expect_list, expect_string,
 };
-use crate::value::{Attrs, Data, PrimOp, Value};
+use crate::value::{Attrs, Data, LambdaInfo, PrimOp, Value};
 
 /// The `builtins` set of one evaluation.
 pub struct Builtins {
     set: Value,
 }
 
-impl Default for Builtins {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The Nix version aetheryx is compatible with (`builtins.nixVersion`).
+pub const NIX_VERSION: &str = "2.28.3";
 
 impl Builtins {
-    pub fn new() -> Self {
+    /// The `builtins` set; with `pure_eval`, without the impure builtins, as
+    /// with Nix's `pure-eval` setting.
+    pub fn new(pure_eval: bool) -> Self {
         let set = Value::undefined();
         let mut attrs = Attrs::new();
         for builtin in builtins::all() {
+            if pure_eval && !builtin.in_pure_eval {
+                continue;
+            }
             let value = match builtin.name {
                 "builtins" => set.clone(),
+                // The search path, which is empty in pure evaluation.
+                "nixPath" if pure_eval => Value::list(Vec::new()),
                 name => builtin_value(name),
             };
             attrs.insert(builtin.name.into(), value);
@@ -57,18 +61,31 @@ fn builtin_value(name: &'static str) -> Value {
         "null" => Value::null(),
         "storeDir" => Value::string("/nix/store"),
         "langVersion" => Value::int(6),
+        "nixVersion" => Value::string(NIX_VERSION),
         _ => match primop(name) {
             Some(op) => Value::primop(op),
-            None => {
-                let kind = builtins::get(name).map(|b| b.kind);
-                if kind == Some(builtins::Kind::Value) {
-                    Value::thunk(move || Err(unsupported(name)))
-                } else {
-                    Value::primop(unsupported_primop(name))
-                }
-            }
+            None => match builtins::get(name).map(|b| b.kind) {
+                Some(builtins::Kind::Value) => Value::thunk(move || Err(unsupported(name))),
+                Some(builtins::Kind::NixDefined) => nix_defined(name),
+                _ => Value::primop(unsupported_primop(name)),
+            },
         },
     }
+}
+
+/// A builtin that Nix implements in Nix code, as a lambda at the position
+/// Nix reports for it; calling it fails, as it is not supported yet.
+fn nix_defined(name: &'static str) -> Value {
+    let pos = match name {
+        "derivation" => "<nix/derivation-internal.nix>:30:1",
+        _ => unreachable!("'{name}' is not defined in Nix code"),
+    };
+    let info = LambdaInfo {
+        name: None,
+        pos: pos.into(),
+        formals: None,
+    };
+    Value::lambda(Rc::new(info), move |_| Err(unsupported(name)))
 }
 
 fn unsupported(name: &str) -> Error {
@@ -529,7 +546,7 @@ mod tests {
     // Expected outputs are what Nix 2.28 prints for the same calls.
 
     fn builtins() -> Builtins {
-        Builtins::new()
+        Builtins::new(false)
     }
 
     fn apply_builtin(name: &str, args: Vec<Value>) -> Result<String> {

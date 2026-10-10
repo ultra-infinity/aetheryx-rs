@@ -334,6 +334,7 @@ dependencies = [
  "clap",
  "eval",
  "ir",
+ "libc",
  "miette",
  "pliron",
  "rnix",

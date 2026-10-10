@@ -87,6 +87,9 @@ pub fn source_name_of(ctx: &Context, loc: &Location) -> Option<String> {
 /// The name Nix gives the source of an `--expr` expression.
 pub const EXPR_NAME: &str = "«string»";
 
+/// The name Nix gives the source of an expression read from standard input.
+pub const STDIN_NAME: &str = "«stdin»";
+
 /// A Nix source being compiled: a file, or an expression given on the
 /// command line.
 pub struct SourceFile {
@@ -147,6 +150,16 @@ impl SourceFile {
     ///
     /// Fails if `cwd` is not valid UTF-8.
     pub fn expr(ctx: &Context, text: impl Into<String>, cwd: &Path) -> std::io::Result<Self> {
+        Self::unnamed(ctx, EXPR_NAME, text.into(), cwd)
+    }
+
+    /// An expression read from standard input (`--file -`): like
+    /// [`Self::expr`], but its positions show [`STDIN_NAME`].
+    pub fn stdin(ctx: &Context, text: impl Into<String>, cwd: &Path) -> std::io::Result<Self> {
+        Self::unnamed(ctx, STDIN_NAME, text.into(), cwd)
+    }
+
+    fn unnamed(ctx: &Context, name: &str, text: String, cwd: &Path) -> std::io::Result<Self> {
         let cwd = cwd.to_str().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -156,11 +169,11 @@ impl SourceFile {
         let base_dir = paths::abs_path(".", cwd);
         Ok(Self::build(
             ctx,
-            EXPR_NAME.into(),
-            EXPR_NAME.to_string(),
+            name.into(),
+            name.to_string(),
             base_dir,
             true,
-            text.into(),
+            text,
         ))
     }
 

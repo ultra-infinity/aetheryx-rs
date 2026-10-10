@@ -195,9 +195,9 @@ mod tests {
             }),
             Ok,
         );
-        let map = Builtins::new().get("map").unwrap();
+        let map = Builtins::new(false).get("map").unwrap();
         let add_1 = crate::ops::call(
-            &Builtins::new().get("add").unwrap().force().unwrap(),
+            &Builtins::new(false).get("add").unwrap().force().unwrap(),
             Value::int(1),
         )
         .unwrap();

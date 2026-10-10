@@ -23,6 +23,7 @@ fn eval(src: &str) -> std::result::Result<String, String> {
 fn eval_here(src: &str) -> std::result::Result<String, String> {
     let options = LowerOptions {
         home_dir: Some("/home/u".to_string()),
+        pure_eval: false,
     };
     eval_file(src, Path::new("/work"), options).map_err(|e| e.to_string())
 }

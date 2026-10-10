@@ -12,6 +12,14 @@
 //!   traces.
 //! - Paths in an `--expr` expression print as plain paths; Nix prefixes them
 //!   with `«unknown»`.
+//! - A set with `type = "derivation"` prints as a set; Nix prints
+//!   `«derivation …»`.
+//! - Values inside error messages can be printed where Nix shows `«thunk»`,
+//!   and the other way around: Nix suspends lambdas and sets in lazy
+//!   positions, and does not suspend constants and variables bound in `let`
+//!   and `rec`; this evaluator does the opposite in both cases.
+//! - Parse errors use rnix's wording, not Nix's (`syntax error, unexpected
+//!   end of file`).
 //! - A failed `assert` reports `assertion failed`. Nix reprints the condition
 //!   (`assertion '(! true)' failed`) and, for `==`, explains the difference.
 //! - For "called with unexpected argument", Nix reports the first unexpected

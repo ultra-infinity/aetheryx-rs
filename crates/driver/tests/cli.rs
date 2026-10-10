@@ -460,3 +460,75 @@ fn samples_evaluate_like_nix_eval() {
     }
     assert_eq!(compared, names.len() - unsupported.len());
 }
+
+#[test]
+fn help_wins_over_a_later_usage_error() {
+    for args in [
+        &["--help", "--bogus"][..],
+        &["eval", "--help", "--expr"][..],
+        &["eval", "--help", "a", "b"][..],
+        &["--help", "nosuchcmd"][..],
+    ] {
+        let (code, out, _) = run(args);
+        assert_eq!(code, 0, "{args:?}");
+        assert!(
+            out.starts_with("Usage:") || out.contains("Usage:"),
+            "{args:?}: {out}"
+        );
+    }
+    // A usage error before `--help` is still an error.
+    assert_eq!(run(&["--bogus", "--help"]).0, 1);
+}
+
+#[test]
+fn setting_values_are_checked_like_nix() {
+    let (code, _, err) = run(&["eval", "--cores", "X", "--expr", "1"]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        err,
+        "error: setting 'cores' has invalid value 'X'\nTry 'aetheryx --help' for more information.\n"
+    );
+    let (code, _, err) = run(&["eval", "--diff-hook", "X", "--expr", "1"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (1, "error: not an absolute path: 'X'\n")
+    );
+    let (code, _, err) = run(&["eval", "--log-format", "bogus", "--expr", "1"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (
+            1,
+            "error: option 'log-format' has an invalid value 'bogus'\n"
+        )
+    );
+    // With --option, a bad value is only a warning.
+    let (code, out, err) = run(&["eval", "--option", "cores", "X", "--expr", "1"]);
+    assert_eq!((code, out.as_str()), (0, "1\n"));
+    assert_eq!(
+        err,
+        "warning: error: setting 'cores' has invalid value 'X'\n"
+    );
+    for (args, warning) in [
+        (
+            &[
+                "eval",
+                "--extra-experimental-features",
+                "bogus-feature",
+                "--expr",
+                "1",
+            ][..],
+            "warning: unknown experimental feature 'bogus-feature'\n",
+        ),
+        (
+            &["eval", "--no-registries", "--expr", "1"][..],
+            "warning: '--no-registries' is deprecated; use '--no-use-registries'\n",
+        ),
+    ] {
+        let (code, out, err) = run(args);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (0, "1\n", warning),
+            "{args:?}"
+        );
+    }
+}

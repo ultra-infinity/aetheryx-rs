@@ -78,7 +78,8 @@ pub fn nix_eval(cmd: &EvalCommand, cwd: &Path, options: LowerOptions) -> Result<
                 })
             };
             let given = utf8(path)?;
-            if given.starts_with('<') && given.ends_with('>') {
+            // Like Nix, `<>` itself is an ordinary path.
+            if given.len() > 2 && given.starts_with('<') && given.ends_with('>') {
                 return Err(EvalError::Message(format!(
                     "the search path ('{given}') is not supported by aetheryx yet"
                 )));

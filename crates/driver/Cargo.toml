@@ -8,7 +8,6 @@ name = "aetheryx"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
 ir = { path = "../ir" }
 eval = { path = "../eval" }
